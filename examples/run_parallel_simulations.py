@@ -41,6 +41,8 @@ from etas.inversion import ETASParameterCalculation
 from etas.simulation import ETASSimulation
 
 warnings.filterwarnings("ignore")
+warnings.filterwarnings("ignore", message=".*Rounding issues.*")
+warnings.filterwarnings("ignore", category=pd.errors.DtypeWarning)
 
 # --- Pre-compile Numba JIT functions before parallel execution ---
 # This prevents race conditions where workers try to compile the same cached 

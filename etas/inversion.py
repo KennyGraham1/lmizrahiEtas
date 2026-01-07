@@ -1107,6 +1107,7 @@ class ETASParameterCalculation:
                 metadata["fn_pij"],
                 index_col=["source_id", "target_id"],
                 parse_dates=["target_time"],
+                low_memory=False,
             )
         else:
             if not obj.oef_setting:
