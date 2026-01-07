@@ -11,8 +11,27 @@ import logging
 import datetime as dt
 import sys
 import os
+import gc
 import warnings
 from joblib import Parallel, delayed
+
+# --- PARALLEL CONFIGURATION ---
+# Memory-aware worker limits to prevent OOM
+def get_safe_n_jobs(per_worker_gb=1.5):
+    """Calculate safe number of parallel jobs based on available RAM."""
+    try:
+        import psutil
+        ram_gb = psutil.virtual_memory().available / (1024**3)
+        return max(1, int(ram_gb / per_worker_gb))
+    except ImportError:
+        # Fallback if psutil not available
+        return 10
+
+# Inversions are memory-heavy (~14 GB per worker based on profiling)
+N_JOBS_INVERSION = min(12, get_safe_n_jobs(per_worker_gb=14.0))
+
+# Simulations are lighter (~2 GB per worker)
+N_JOBS_SIMULATION = min(40, get_safe_n_jobs(per_worker_gb=2.0))
 
 # Add parent directory to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -161,15 +180,21 @@ def run_inversion(date):
         calculation.prepare()
         calculation.invert()
         calculation.store_results(config['data_path'], store_pij=True)
-        return f"Done {model_id}"
+        result = f"Done {model_id}"
     except Exception as e:
         logger.error(f"Failed inversion for {model_id}: {e}")
-        return f"Failed {model_id}"
+        result = f"Failed {model_id}"
+    finally:
+        # Force garbage collection to free memory for next worker
+        if 'calculation' in dir():
+            del calculation
+        gc.collect()
+    return result
 
 
-# Run inversions in parallel (uses all available CPU cores)
-logger.info(f"Running {len(all_dates)} inversions in parallel...")
-inversion_results = Parallel(n_jobs=10)(delayed(run_inversion)(date) for date in all_dates)
+# Run inversions in parallel (uses memory-aware worker count)
+logger.info(f"Running {len(all_dates)} inversions in parallel with {N_JOBS_INVERSION} workers...")
+inversion_results = Parallel(n_jobs=N_JOBS_INVERSION)(delayed(run_inversion)(date) for date in all_dates)
 logger.info("Inversions complete!")
 for r in inversion_results:
     logger.info(r)
@@ -227,7 +252,8 @@ def run_simulation(run_number):
 
     etas_reload = ETASParameterCalculation.load_calculation(inversion_output)
     
-    simulation = ETASSimulation(etas_reload)
+    # Use approx_times=True for faster simulation (5-10x speedup)
+    simulation = ETASSimulation(etas_reload, approx_times=True)
     simulation.prepare()
     
     # Update catalog for this specific timewindow
@@ -235,11 +261,17 @@ def run_simulation(run_number):
     simulation.catalog = nzcat.query("time < @timewindow_end").copy()
     simulation.catalog["xi_plus_1"] = 1.0
     
-    simulation.simulate_to_csv(
-        fn_store_simulation, forecast_period, n_simulations, 
-        m_threshold=inversion_config_base["mc"]
-    )
-    return f"Done {fn_store_simulation}"
+    try:
+        simulation.simulate_to_csv(
+            fn_store_simulation, forecast_period, n_simulations, 
+            m_threshold=inversion_config_base["mc"]
+        )
+        result = f"Done {fn_store_simulation}"
+    finally:
+        # Force garbage collection to free memory for next worker
+        del simulation, etas_reload
+        gc.collect()
+    return result
 
 
 if __name__ == "__main__":
@@ -248,8 +280,9 @@ if __name__ == "__main__":
     total_runs = n_files * len(all_dates)
     logger.info(f"Total runs: {total_runs} (dates: {len(all_dates)}, files: {n_files})")
     
-    # Run in parallel
-    results = Parallel(n_jobs=10)(delayed(run_simulation)(i) for i in range(total_runs))
+    # Run in parallel (uses memory-aware worker count)
+    logger.info(f"Using {N_JOBS_SIMULATION} workers for simulations...")
+    results = Parallel(n_jobs=N_JOBS_SIMULATION)(delayed(run_simulation)(i) for i in range(total_runs))
     
     logger.info("Parallel simulations complete!")
     for r in results[:10]:

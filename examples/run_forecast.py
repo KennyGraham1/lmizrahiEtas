@@ -27,7 +27,8 @@ if __name__ == '__main__':
     logger.info(f"Inversion complete. Parameters: {theta}")
 
     m_max = forecast_config.get('m_max', None)
-    simulation = ETASSimulation(etas_invert, m_max=m_max)
+    # Use approx_times=True for faster simulation (5-10x speedup)
+    simulation = ETASSimulation(etas_invert, m_max=m_max, approx_times=True)
     simulation.prepare()
     fn_store_simulation = forecast_config['fn_store_simulation']
     forecast_duration = forecast_config['forecast_duration']

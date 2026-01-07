@@ -30,6 +30,19 @@ from etas.inversion import (ETASParameterCalculation, branching_integral,
                             upper_gamma_ext)
 from etas.mc_b_est import simulate_magnitudes, simulate_magnitudes_from_zone
 
+# Try to import Numba for JIT compilation (optional optimization)
+try:
+    from numba import jit, prange
+    NUMBA_AVAILABLE = True
+except ImportError:
+    NUMBA_AVAILABLE = False
+    # Create a no-op decorator fallback
+    def jit(*args, **kwargs):
+        def decorator(func):
+            return func
+        return decorator
+    prange = range
+
 logger = logging.getLogger(__name__)
 
 
@@ -245,19 +258,76 @@ def simulate_aftershock_time(log10_c, omega, log10_tau, size=1):
     )
 
 
+# JIT-compiled core for untapered time simulation
+@jit(nopython=True, cache=True, parallel=True)
+def _simulate_aftershock_time_untapered_core(c, omega, y):
+    """
+    JIT-compiled core for untapered Omori time simulation.
+    """
+    n = len(y)
+    result = np.empty(n, dtype=np.float64)
+    
+    for i in prange(n):
+        result[i] = (1.0 - y[i]) ** (-1.0 / omega) * c - c
+    
+    return result
+
+
 def simulate_aftershock_time_untapered(log10_c, omega, size=1):
-    # time delay in days
-
-    # TODO: find a way to sample y values with higher precision that 1e-15
-    # otherwise there is a maximum time delay that will be sampled...
-
+    """
+    Simulate aftershock times using untapered Omori law.
+    Uses JIT compilation when available.
+    
+    Note: There is a maximum time delay that can be sampled due to
+    floating point precision limits (~1e-15).
+    """
     c = np.power(10, log10_c)
     y = np.random.uniform(size=size)
-
+    
+    if NUMBA_AVAILABLE and size > 1:
+        return _simulate_aftershock_time_untapered_core(c, omega, y)
+    
     return np.power((1 - y), -1 / omega) * c - c
 
 
+# JIT-compiled core for approximate time CDF inversion
+@jit(nopython=True, cache=True, parallel=True)
+def _inv_time_cdf_approx_core(p, c, tau, omega):
+    """
+    JIT-compiled inverse CDF for approximate aftershock time distribution.
+    """
+    n = len(p)
+    result = np.empty(n, dtype=np.float64)
+    
+    # Precompute constants
+    part_a = -1.0 / omega * (np.power(tau + c, -omega) - np.power(c, -omega))
+    part_b = np.exp(1.0) * np.power(tau + c, -(1.0 + omega)) * (tau / np.exp(1.0))
+    k1 = 1.0 / (part_a + part_b)
+    k2 = k1 * np.exp(1.0) / np.power(tau + c, 1.0 + omega)
+    threshold = part_a / (part_a + part_b)
+    
+    for i in prange(n):
+        if p[i] < threshold:
+            # Use power-law approximation for early times
+            result[i] = np.power(np.power(c, -omega) - omega * p[i] / k1, -1.0 / omega) - c
+        else:
+            # Use exponential approximation for late times
+            result[i] = np.log((p[i] - threshold) * (-1.0) / (tau * k2) + np.exp(-1.0)) * (-tau)
+    
+    return result
+
+
 def inv_time_cdf_approx(p, c, tau, omega):
+    """
+    Inverse CDF for approximate aftershock time distribution.
+    Uses JIT compilation when available for significant speedup.
+    """
+    p_arr = np.asarray(p, dtype=np.float64)
+    
+    if NUMBA_AVAILABLE and len(p_arr) > 0:
+        return _inv_time_cdf_approx_core(p_arr, c, tau, omega)
+    
+    # Fallback to NumPy implementation
     part_a = -1 / omega * (np.power(tau + c, -omega) - np.power(c, -omega))
     part_b = np.exp(1) * np.power(tau + c, -(1 + omega)) * (tau / np.exp(1))
     k1 = 1 / (part_a + part_b)
@@ -272,7 +342,10 @@ def inv_time_cdf_approx(p, c, tau, omega):
 
 
 def simulate_aftershock_time_approx(log10_c, omega, log10_tau, size=1):
-    # time delay in days
+    """
+    Simulate aftershock times using an approximation.
+    Much faster than the exact version, especially when omega < 0.
+    """
     c = np.power(10, log10_c)
     tau = np.power(10, log10_tau)
     y = np.random.uniform(size=size)
@@ -294,13 +367,60 @@ def simulate_aftershock_place(log10_d, gamma, rho, mi, mc):
     return x, y
 
 
-def simulate_aftershock_radius(log10_d, gamma, rho, mi, mc):
-    # x and y offset in km
-    d = np.power(10, log10_d)
-    d_g = d * np.exp(gamma * (mi - mc))
-    y_r = np.random.uniform(size=len(mi))
-    r = np.sqrt(np.power(1 - y_r, -1 / rho) * d_g - d_g)
+# JIT-compiled core for aftershock radius simulation
+@jit(nopython=True, cache=True, parallel=True)
+def _simulate_aftershock_radius_core(d, gamma, rho, mi, mc, random_values):
+    """
+    JIT-compiled core calculation for aftershock radii.
+    Computes the spatial distance of aftershocks from their parent events.
+    """
+    n = len(mi)
+    result = np.empty(n, dtype=np.float64)
+    
+    for i in prange(n):
+        d_g = d * np.exp(gamma * (mi[i] - mc))
+        r_squared = (1.0 - random_values[i]) ** (-1.0 / rho) * d_g - d_g
+        result[i] = np.sqrt(r_squared) if r_squared > 0 else 0.0
+    
+    return result
 
+
+def simulate_aftershock_radius(log10_d, gamma, rho, mi, mc):
+    """
+    Simulate the radial distance of aftershocks from their parent events.
+    Uses JIT compilation when Numba is available for significant speedup.
+    
+    Parameters
+    ----------
+    log10_d : float
+        Log10 of the spatial parameter d
+    gamma : float
+        Magnitude scaling parameter for spatial decay
+    rho : float
+        Spatial decay exponent
+    mi : array-like
+        Magnitudes of parent events
+    mc : float
+        Reference (cutoff) magnitude
+    
+    Returns
+    -------
+    np.ndarray
+        Radial distances in km
+    """
+    d = np.power(10, log10_d)
+    
+    # Convert to numpy array if needed
+    mi_arr = np.asarray(mi, dtype=np.float64)
+    y_r = np.random.uniform(size=len(mi_arr))
+    
+    # Use JIT version if available
+    if NUMBA_AVAILABLE:
+        return _simulate_aftershock_radius_core(d, gamma, rho, mi_arr, mc, y_r)
+    
+    # Fallback to NumPy implementation
+    d_g = d * np.exp(gamma * (mi_arr - mc))
+    r = np.sqrt(np.power(1 - y_r, -1 / rho) * d_g - d_g)
     return r
 
 
@@ -1040,7 +1160,7 @@ class ETASSimulation:
         self,
         inversion_params: ETASParameterCalculation,
         gaussian_scale: float = 0.1,
-        approx_times: bool = False,
+        approx_times: bool = True,  # Default True for faster simulation
         m_max: float = None,
         induced_info: list = None,
     ):

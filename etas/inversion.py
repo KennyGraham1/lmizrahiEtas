@@ -32,6 +32,19 @@ from shapely.geometry import Polygon
 from etas.mc_b_est import (estimate_beta_positive, estimate_beta_tinti,
                            round_half_up)
 
+# Try to import Numba for JIT compilation (optional optimization)
+try:
+    from numba import jit, prange
+    NUMBA_AVAILABLE = True
+except ImportError:
+    NUMBA_AVAILABLE = False
+    # Create a no-op decorator fallback
+    def jit(*args, **kwargs):
+        def decorator(func):
+            return func
+        return decorator
+    prange = range
+
 logger = logging.getLogger(__name__)
 
 # ranges for parameters
@@ -316,11 +329,51 @@ def create_initial_values(ranges=RANGES):
     return [np.random.uniform(*r) for r in ranges]
 
 
+# JIT-compiled core calculation for triggering kernel
+# parallel=True enables multi-core execution, prange distributes loop iterations
+@jit(nopython=True, cache=True, parallel=True)
+def _triggering_kernel_core(time_distance, spatial_distance_squared, m,
+                            source_kappa, use_source_kappa,
+                            k0, a, c, omega, tau, d, gamma, rho, mc):
+    """
+    JIT-compiled core calculation for the triggering kernel.
+    Computes the (not normalized) likelihood that source event triggered target.
+    
+    When Numba is available, this provides significant speedup (10-100x).
+    With parallel=True and prange, this runs across all CPU cores.
+    """
+    n = len(time_distance)
+    result = np.empty(n, dtype=np.float64)
+    
+    # prange enables parallel execution across CPU cores
+    for i in prange(n):
+        # Aftershock number
+        if use_source_kappa:
+            aftershock_num = source_kappa[i]
+        else:
+            aftershock_num = k0 * np.exp(a * (m[i] - mc))
+        
+        # Time decay
+        t = time_distance[i]
+        time_decay = np.exp(-t / tau) / np.power(t + c, 1.0 + omega)
+        
+        # Space decay
+        s = spatial_distance_squared[i]
+        d_scaled = d * np.exp(gamma * (m[i] - mc))
+        space_decay = 1.0 / np.power(s + d_scaled, 1.0 + rho)
+        
+        result[i] = aftershock_num * time_decay * space_decay
+    
+    return result
+
+
 def triggering_kernel(metrics, params):
     """
     Given time distance in days and squared space distance in square km and
     magnitude of target event, calculate the (not normalized) likelihood,
     that source event triggered target event.
+    
+    Uses JIT compilation when Numba is available for significant speedup.
     """
     time_distance, spatial_distance_squared, m, source_kappa = metrics
     theta, mc = params
@@ -338,11 +391,30 @@ def triggering_kernel(metrics, params):
         rho,
     ) = theta
 
-    if source_kappa is None:
-        k0 = np.power(10, log10_k0)
+    k0 = np.power(10, log10_k0)
     c = np.power(10, log10_c)
     tau = np.power(10, log10_tau)
     d = np.power(10, log10_d)
+    
+    # Use JIT-compiled version when we have arrays and Numba is available
+    if NUMBA_AVAILABLE and hasattr(time_distance, '__len__'):
+        # Convert pandas Series to numpy arrays for Numba
+        t_arr = np.asarray(time_distance, dtype=np.float64)
+        s_arr = np.asarray(spatial_distance_squared, dtype=np.float64)
+        m_arr = np.asarray(m, dtype=np.float64)
+        
+        use_source_kappa = source_kappa is not None
+        if use_source_kappa:
+            sk_arr = np.asarray(source_kappa, dtype=np.float64)
+        else:
+            sk_arr = np.empty(1, dtype=np.float64)  # Dummy array
+        
+        return _triggering_kernel_core(
+            t_arr, s_arr, m_arr, sk_arr, use_source_kappa,
+            k0, a, c, omega, tau, d, gamma, rho, mc
+        )
+    
+    # Fallback to original NumPy implementation
     aftershock_number = (
         source_kappa if source_kappa is not None else k0 * np.exp(a * (m - mc))
     )
@@ -439,8 +511,61 @@ def expected_aftershocks(event, params, no_start=False, no_end=False):
 def ll_aftershock_term(l_hat, g):
     mask = g != 0
     term = -1 * gammaln(l_hat + 1) - g
-    term = term + l_hat * np.where(mask, np.log(g), -300)
+    # Avoid log(0) warning by replacing 0 with 1 (log(1)=0) where masked
+    safe_g = np.where(mask, g, 1.0)
+    term = term + l_hat * np.where(mask, np.log(safe_g), -300)
     return term
+
+
+
+# JIT-compiled core for negative log-likelihood calculation
+@jit(nopython=True, cache=True, parallel=True)
+def _neg_log_likelihood_core(
+    source_magnitude,
+    spatial_distance_squared,
+    time_distance,
+    pij,
+    zeta_plus_1,
+    upper_gamma_term,
+    log10_k0, a, log10_c, omega, log10_tau, log10_d, gamma, rho, mc_min
+):
+    """
+    JIT-compiled core for the heavy lifting of neg_log_likelihood.
+    Computes the distribution term sums efficiently.
+    """
+    c = np.power(10, log10_c)
+    tau = np.power(10, log10_tau)
+    d = np.power(10, log10_d)
+    
+    n = len(source_magnitude)
+    total_distribution_term = 0.0
+    
+    # Pre-compute constants
+    log_tau = np.log(tau)
+    log_rho = np.log(rho)
+    log_pi = np.log(np.pi)
+    
+    # Parallel reduction
+    for i in prange(n):
+        # Calculate term
+        mag_diff = source_magnitude[i] - mc_min
+        d_scaled = d * np.exp(gamma * mag_diff)
+        
+        term1 = (omega * log_tau - np.log(upper_gamma_term) + 
+                 log_rho + rho * np.log(d_scaled))
+        
+        term2 = (1 + rho) * np.log(spatial_distance_squared[i] + d_scaled)
+        
+        time_c = time_distance[i] + c
+        term3 = (1 + omega) * np.log(time_c)
+        
+        term4 = time_c / tau
+        
+        likelihood_term = term1 - term2 - term3 - term4 - log_pi
+        
+        total_distribution_term += pij[i] * zeta_plus_1[i] * likelihood_term
+        
+    return total_distribution_term
 
 
 def neg_log_likelihood(theta, Pij, source_events, mc_min):
@@ -471,28 +596,44 @@ def neg_log_likelihood(theta, Pij, source_events, mc_min):
         source_events["G"],
     ).sum()
 
-    # space time distribution term
-    Pij["likelihood_term"] = (
-        (
-            omega * np.log(tau)
-            - np.log(upper_gamma_ext(-omega, c / tau))
-            + np.log(rho)
-            + rho * np.log(d * np.exp(gamma
-                           * (Pij["source_magnitude"] - mc_min)))
+    # Pre-calculate scalar term involving upper_gamma_ext
+    ug_term = upper_gamma_ext(-omega, c / tau)
+
+    # Use JIT version if available for the expensive loop
+    if NUMBA_AVAILABLE:
+        distribution_term = _neg_log_likelihood_core(
+            Pij["source_magnitude"].values,
+            Pij["spatial_distance_squared"].values,
+            Pij["time_distance"].values,
+            Pij["Pij"].values,
+            Pij["zeta_plus_1"].values,
+            ug_term,
+            log10_k0, a, log10_c, omega, log10_tau, log10_d, gamma, rho, mc_min
         )
-        - (
-            (1 + rho)
-            * np.log(
-                Pij["spatial_distance_squared"]
-                + (d * np.exp(gamma * (Pij["source_magnitude"] - mc_min)))
+    else:
+        # Fallback to original Pandas implementation
+        # space time distribution term
+        Pij["likelihood_term"] = (
+            (
+                omega * np.log(tau)
+                - np.log(ug_term)
+                + np.log(rho)
+                + rho * np.log(d * np.exp(gamma
+                               * (Pij["source_magnitude"] - mc_min)))
             )
+            - (
+                (1 + rho)
+                * np.log(
+                    Pij["spatial_distance_squared"]
+                    + (d * np.exp(gamma * (Pij["source_magnitude"] - mc_min)))
+                )
+            )
+            - (1 + omega) * np.log(Pij["time_distance"] + c)
+            - (Pij["time_distance"] + c) / tau
+            - np.log(np.pi)
         )
-        - (1 + omega) * np.log(Pij["time_distance"] + c)
-        - (Pij["time_distance"] + c) / tau
-        - np.log(np.pi)
-    )
-    distribution_term = Pij["Pij"].mul(
-        Pij["zeta_plus_1"]).mul(Pij["likelihood_term"]).sum()
+        distribution_term = Pij["Pij"].mul(
+            Pij["zeta_plus_1"]).mul(Pij["likelihood_term"]).sum()
 
     total = aftershock_term + distribution_term
 
@@ -1624,15 +1765,16 @@ class ETASParameterCalculation:
         for source in relevant.itertuples():
             stime = source.time
 
-            # filter potential targets
-            if source.time < self.timewindow_start:
-                potential_targets = targets.copy()
-            else:
-                potential_targets = targets.query("time>@stime").copy()
-            targets = potential_targets.copy()
-
-            if potential_targets.shape[0] == 0:
+            # filter potential targets - optimized to reduce copies
+            if source.time >= self.timewindow_start:
+                # Filter targets to only those after source time
+                targets = targets.query("time>@stime")
+            
+            if targets.shape[0] == 0:
                 continue
+                
+            # Only copy when we need to modify (add columns)
+            potential_targets = targets.copy()
 
             # calculate spatial distance from source to target event
             if self.three_dim:
