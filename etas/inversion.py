@@ -538,14 +538,15 @@ def _neg_log_likelihood_core(
     d = np.power(10, log10_d)
     
     n = len(source_magnitude)
-    total_distribution_term = 0.0
     
     # Pre-compute constants
     log_tau = np.log(tau)
     log_rho = np.log(rho)
     log_pi = np.log(np.pi)
     
-    # Parallel reduction
+    # Use local array for safe parallel reduction (avoids race condition)
+    terms = np.empty(n, dtype=np.float64)
+    
     for i in prange(n):
         # Calculate term
         mag_diff = source_magnitude[i] - mc_min
@@ -563,9 +564,9 @@ def _neg_log_likelihood_core(
         
         likelihood_term = term1 - term2 - term3 - term4 - log_pi
         
-        total_distribution_term += pij[i] * zeta_plus_1[i] * likelihood_term
+        terms[i] = pij[i] * zeta_plus_1[i] * likelihood_term
         
-    return total_distribution_term
+    return np.sum(terms)
 
 
 def neg_log_likelihood(theta, Pij, source_events, mc_min):
@@ -721,28 +722,43 @@ def neg_log_likelihood_free_prod(
         [theta, mc_min],
     )
 
-    # space time distribution term
-    Pij["likelihood_term"] = (
-        (
-            omega * np.log(tau)
-            - np.log(upper_gamma_ext(-omega, c / tau))
-            + np.log(rho)
-            + rho * np.log(d * np.exp(gamma
-                           * (Pij["source_magnitude"] - mc_min)))
+    # Pre-calculate scalar term involving upper_gamma_ext
+    ug_term = upper_gamma_ext(-omega, c / tau)
+
+    if NUMBA_AVAILABLE:
+        distribution_term = _neg_log_likelihood_core(
+            Pij["source_magnitude"].values,
+            Pij["spatial_distance_squared"].values,
+            Pij["time_distance"].values,
+            Pij["Pij"].values,
+            Pij["zeta_plus_1"].values,
+            ug_term,
+            0.0, 0.0,  # Dummy k0, a (unused in core)
+            log10_c, omega, log10_tau, log10_d, gamma, rho, mc_min
         )
-        - (
-            (1 + rho)
-            * np.log(
-                Pij["spatial_distance_squared"]
-                + (d * np.exp(gamma * (Pij["source_magnitude"] - mc_min)))
+    else:
+        # space time distribution term
+        Pij["likelihood_term"] = (
+            (
+                omega * np.log(tau)
+                - np.log(ug_term)
+                + np.log(rho)
+                + rho * np.log(d * np.exp(gamma
+                               * (Pij["source_magnitude"] - mc_min)))
             )
+            - (
+                (1 + rho)
+                * np.log(
+                    Pij["spatial_distance_squared"]
+                    + (d * np.exp(gamma * (Pij["source_magnitude"] - mc_min)))
+                )
+            )
+            - (1 + omega) * np.log(Pij["time_distance"] + c)
+            - (Pij["time_distance"] + c) / tau
+            - np.log(np.pi)
         )
-        - (1 + omega) * np.log(Pij["time_distance"] + c)
-        - (Pij["time_distance"] + c) / tau
-        - np.log(np.pi)
-    )
-    distribution_term = Pij["Pij"].mul(
-        Pij["zeta_plus_1"]).mul(Pij["likelihood_term"]).sum()
+        distribution_term = Pij["Pij"].mul(
+            Pij["zeta_plus_1"]).mul(Pij["likelihood_term"]).sum()
 
     total = distribution_term
 

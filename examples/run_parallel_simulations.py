@@ -52,6 +52,7 @@ nzcat = pd.read_csv(fn_catalog, index_col=0, parse_dates=["time"])
 nzcat.sort_values(by="time", inplace=True)
 
 # Kaikoura sequence dates (from user's notebook)
+# represents the forecast start dates for the Kaikoura earthquake sequence.
 dates = [
     dt.datetime(2016, 11, 13, 12, 0, 0),
     dt.datetime(2016, 11, 14, 12, 0, 0),
