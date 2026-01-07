@@ -31,7 +31,7 @@ def get_safe_n_jobs(per_worker_gb=1.5):
 N_JOBS_INVERSION = min(12, get_safe_n_jobs(per_worker_gb=14.0))
 
 # Simulations are lighter (~2 GB per worker)
-N_JOBS_SIMULATION = min(40, get_safe_n_jobs(per_worker_gb=2.0))
+N_JOBS_SIMULATION = min(12, get_safe_n_jobs(per_worker_gb=2.0))
 
 # Add parent directory to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -41,6 +41,37 @@ from etas.inversion import ETASParameterCalculation
 from etas.simulation import ETASSimulation
 
 warnings.filterwarnings("ignore")
+
+# --- Pre-compile Numba JIT functions before parallel execution ---
+# This prevents race conditions where workers try to compile the same cached 
+# functions simultaneously, which can cause SIGKILL crashes
+def _precompile_jit_functions():
+    """Trigger Numba compilation in main process before spawning workers."""
+    try:
+        import numpy as np
+        from etas.inversion import _triggering_kernel_core, _neg_log_likelihood_core
+        
+        # Dummy arrays to trigger compilation
+        n = 10
+        dummy_arr = np.ones(n, dtype=np.float64)
+        dummy_bool_arr = np.zeros(n, dtype=np.float64)
+        
+        # Compile _triggering_kernel_core
+        _triggering_kernel_core(
+            dummy_arr, dummy_arr, dummy_arr, dummy_arr, False,
+            1.0, 1.0, 0.01, 0.1, 100.0, 0.1, 0.3, 0.8, 3.0
+        )
+        
+        # Compile _neg_log_likelihood_core
+        _neg_log_likelihood_core(
+            dummy_arr, dummy_arr, dummy_arr, dummy_arr, dummy_arr,
+            1.0, 1.0, 1.0, -2.0, 0.1, 3.0, -2.0, 0.3, 0.8, 3.0
+        )
+        print("Numba JIT functions pre-compiled successfully")
+    except Exception as e:
+        print(f"JIT pre-compilation warning (non-fatal): {e}")
+
+_precompile_jit_functions()
 set_up_logger(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
