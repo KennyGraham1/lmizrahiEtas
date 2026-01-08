@@ -224,6 +224,41 @@ The aftershocks themselves become parents for the next generation. The loop cont
 | `output_nz/` | `sources_nz_Kaikoura_X.csv` | Source event metadata |
 | `simulations_nz/` | `sim_nz_Kaikoura_X_Y.csv` | Synthetic catalog (X=model, Y=chunk) |
 
+### Simulation File Naming Convention
+
+The simulation output files follow this naming pattern:
+
+```
+sim_nz_Kaikoura_2_5.csv
+│   │  │        │ │
+│   │  │        │ └─ file_no (Y) = chunk index (0-9 when n_files=10)
+│   │  │        └─── date_index (X) = index into dates array
+│   │  └──────────── sequence = earthquake sequence name
+│   └─────────────── region = study region code
+└─────────────────── prefix = simulation output marker
+```
+
+| Component | Example | Meaning |
+|-----------|---------|---------|
+| `sim_` | - | Identifies this as simulation output |
+| `nz_` | - | New Zealand region |
+| `Kaikoura` | - | Kaikoura earthquake sequence (vs. Canterbury) |
+| `2` (X) | `dates[2]` | 3rd forecast date: `2016-11-15 12:00:00` |
+| `5` (Y) | Chunk 5 | Simulation batch 5 of 10 (contains sims 501-600) |
+
+**How simulations are distributed across files:**
+
+With default settings (`n_files=10`, `n_simulations_overall=10000`):
+- Each model/date gets split into 10 file chunks
+- Each chunk contains `10000 / 10 = 1000` simulations
+- File `_X_Y.csv` contains simulations `(Y * 1000)` through `((Y+1) * 1000 - 1)`
+
+**Example:** For Kaikoura model index 4:
+- `sim_nz_Kaikoura_4_0.csv` → simulations 0-999
+- `sim_nz_Kaikoura_4_1.csv` → simulations 1000-1999
+- ...
+- `sim_nz_Kaikoura_4_9.csv` → simulations 9000-9999
+
 ---
 
 ## Performance Optimizations

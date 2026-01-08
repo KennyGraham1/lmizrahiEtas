@@ -1086,6 +1086,8 @@ class ETASParameterCalculation:
                 metadata["fn_src"],
                 index_col=0
             )
+            # Ensure index matches catalog index type (string)
+            obj.source_events.index = obj.source_events.index.astype(str)
         else:
             if not obj.oef_setting:
                 obj.logger.warning("Sources could not be loaded. \

@@ -290,10 +290,10 @@ def run_simulation(run_number):
     simulation = ETASSimulation(etas_reload, approx_times=True)
     simulation.prepare()
     
-    # Update catalog for this specific timewindow
+    # Update timewindow_end for this specific forecast date
+    # Note: Do NOT overwrite simulation.catalog - prepare() already set it up 
+    # correctly with source_events linkage
     simulation.inversion_params.timewindow_end = timewindow_end
-    simulation.catalog = nzcat.query("time < @timewindow_end").copy()
-    simulation.catalog["xi_plus_1"] = 1.0
     
     try:
         simulation.simulate_to_csv(
