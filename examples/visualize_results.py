@@ -1790,7 +1790,349 @@ def create_html_dashboard(output_dir: str = "figures"):
     return output_path
 
 
-def run_visualization(sequence: str = "Kaikoura", max_models: int = None):
+def plot_magnitude_dependent_ntests(n_test_results_by_mag: dict, sequence: str,
+                                     dates: list, output_path: str = None):
+    """Plot N-test results separated by magnitude threshold."""
+    
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10))
+    
+    mainshock = min(dates)
+    days = [(d - mainshock).total_seconds() / 86400 for d in dates]
+    
+    # Color scheme for different magnitude thresholds
+    mag_colors = {
+        4.1: '#3498DB',
+        4.5: '#2ECC71',
+        5.0: '#F39C12',
+        5.5: '#E74C3C'
+    }
+    
+    # --- Top: Quantile Evolution ---
+    ax1.axhspan(0.025, 0.975, alpha=0.15, color=COLORS['consistent'])
+    
+    for mag_thresh, results in sorted(n_test_results_by_mag.items()):
+        quantiles = [r["quantile"] for r in results]
+        color = mag_colors.get(mag_thresh, '#95A5A6')
+        ax1.plot(days[:len(quantiles)], quantiles, 'o-', color=color, linewidth=2,
+                markersize=6, label=f'M ≥ {mag_thresh}', alpha=0.8)
+    
+    ax1.set_ylabel("N-Test Quantile", fontsize=12, fontweight='medium')
+    ax1.set_xlabel("Days After Mainshock", fontsize=12, fontweight='medium')
+    ax1.set_title("Magnitude-Dependent Forecast Consistency", fontsize=13, fontweight='bold')
+    ax1.legend(loc='best', ncol=2)
+    ax1.set_ylim(-0.05, 1.05)
+    ax1.grid(True, alpha=0.3)
+    
+    # --- Bottom: Consistency Rate ---
+    mag_thresholds = sorted(n_test_results_by_mag.keys())
+    consistency_rates = []
+    total_forecasts = []
+    
+    for mag_thresh in mag_thresholds:
+        results = n_test_results_by_mag[mag_thresh]
+        n_consistent = sum(1 for r in results if r["consistent"])
+        consistency_rates.append(100 * n_consistent / len(results))
+        total_forecasts.append(len(results))
+    
+    x = np.arange(len(mag_thresholds))
+    bars = ax2.bar(x, consistency_rates, color=[mag_colors.get(m, '#95A5A6') for m in mag_thresholds],
+                   alpha=0.7, edgecolor='white', linewidth=2)
+    
+    # Add value labels
+    for i, (rate, total) in enumerate(zip(consistency_rates, total_forecasts)):
+        ax2.text(i, rate + 2, f'{rate:.0f}%\n(n={total})', 
+                ha='center', fontsize=10, fontweight='bold')
+    
+    ax2.axhline(95, color='green', linestyle='--', linewidth=1.5, alpha=0.5, label='95% Target')
+    ax2.set_ylabel("Consistency Rate (%)", fontsize=12, fontweight='medium')
+    ax2.set_xlabel("Magnitude Threshold", fontsize=12, fontweight='medium')
+    ax2.set_xticks(x)
+    ax2.set_xticklabels([f'M ≥ {m}' for m in mag_thresholds])
+    ax2.set_ylim(0, 105)
+    ax2.legend(loc='lower right')
+    ax2.grid(True, alpha=0.3, axis='y')
+    
+    fig.suptitle(f"Magnitude-Dependent N-Test Analysis: {sequence} Sequence",
+                fontsize=15, fontweight='bold', y=0.995)
+    
+    plt.tight_layout()
+    
+    if output_path:
+        plt.savefig(output_path)
+        print(f"Saved: {output_path}")
+    plt.close(fig)
+    return fig
+
+
+def plot_information_gain_timeline(ig_results: list, sequence: str, 
+                                   dates: list, output_path: str = None):
+    """Plot Information Gain evolution over time."""
+    
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), height_ratios=[2, 1])
+    
+    mainshock = min(dates)
+    days = [(d - mainshock).total_seconds() / 86400 for d in dates]
+    
+    information_gains = [r["information_gain"] for r in ig_results]
+    brier_scores = [r["brier_score"] for r in ig_results]
+    
+    # --- Top: Information Gain ---
+    ax1.axhline(0, color='black', linestyle='--', linewidth=1, alpha=0.5)
+    ax1.plot(days, information_gains, 'o-', color=COLORS['primary'], linewidth=2.5,
+            markersize=8, markeredgecolor='white', markeredgewidth=2, label='Information Gain')
+    
+    # Add trend line
+    if len(days) > 5:
+        z = np.polyfit(days, information_gains, 2)
+        p = np.poly1d(z)
+        ax1.plot(days, p(days), '--', color='gray', linewidth=2, alpha=0.5, label='Trend (quadratic)')
+    
+    # Shade positive/negative regions
+    ax1.fill_between(days, 0, information_gains, 
+                     where=[ig >= 0 for ig in information_gains],
+                     alpha=0.2, color='green', label='Positive IG (Better than Poisson)')
+    ax1.fill_between(days, 0, information_gains,
+                     where=[ig < 0 for ig in information_gains],
+                     alpha=0.2, color='red', label='Negative IG (Worse than Poisson)')
+    
+    ax1.set_ylabel("Information Gain (nats)", fontsize=12, fontweight='medium')
+    ax1.set_xlabel("Days After Mainshock", fontsize=12, fontweight='medium')
+    ax1.set_title("Forecast Skill Evolution", fontsize=13, fontweight='bold')
+    ax1.legend(loc='best', ncol=2, fontsize=9)
+    ax1.grid(True, alpha=0.3)
+    
+    # Annotate key points
+    max_ig_idx = np.argmax(information_gains)
+    ax1.annotate(f'Peak IG: {information_gains[max_ig_idx]:.2f}\nDay {days[max_ig_idx]:.0f}',
+                xy=(days[max_ig_idx], information_gains[max_ig_idx]),
+                xytext=(15, 15), textcoords='offset points',
+                fontsize=9, bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
+                arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=.2'))
+    
+    # --- Bottom: Brier Score ---
+    ax2.plot(days, brier_scores, 's-', color=COLORS['warning'], linewidth=2.5,
+            markersize=8, markeredgecolor='white', markeredgewidth=2)
+    ax2.set_ylabel("Brier Score\n(lower = better)", fontsize=12, fontweight='medium')
+    ax2.set_xlabel("Days After Mainshock", fontsize=12, fontweight='medium')
+    ax2.set_title("Probabilistic Forecast Accuracy", fontsize=13, fontweight='bold')
+    ax2.grid(True, alpha=0.3)
+    ax2.set_ylim(bottom=0)
+    
+    fig.suptitle(f"Forecast Skill Metrics: {sequence} Sequence",
+                fontsize=15, fontweight='bold', y=0.995)
+    
+    plt.tight_layout()
+    
+    if output_path:
+        plt.savefig(output_path)
+        print(f"Saved: {output_path}")
+    plt.close(fig)
+    return fig
+
+
+def calculate_spatial_ltest(simulations: pd.DataFrame, observed: pd.DataFrame) -> dict:
+    """Calculate CSEP-standard spatial L-test using kernel density estimation."""
+    
+    try:
+        from scipy.stats import gaussian_kde
+        
+        # Create KDE from simulations
+        if len(simulations) < 10:
+            return {"l_test_stat": np.nan, "spatial_ll": np.nan, "n_obs": len(observed)}
+        
+        # Subsample simulations for computational efficiency
+        if len(simulations) > 10000:
+            sim_sample = simulations.sample(n=10000)
+        else:
+            sim_sample = simulations
+        
+        # Build KDE
+        sim_points = np.vstack([sim_sample["longitude"], sim_sample["latitude"]])
+        kde = gaussian_kde(sim_points)
+        
+        # Evaluate log-likelihood for each observed event
+        if len(observed) == 0:
+            return {"l_test_stat": np.nan, "spatial_ll": np.nan, "n_obs": 0}
+        
+        obs_points = np.vstack([observed["longitude"], observed["latitude"]])
+        log_likelihoods = kde.logpdf(obs_points)
+        
+        # Total spatial log-likelihood
+        spatial_ll = np.sum(log_likelihoods)
+        
+        # L-test statistic (average log-likelihood per event)
+        l_test_stat = spatial_ll / len(observed) if len(observed) > 0 else np.nan
+        
+        return {
+            "l_test_stat": l_test_stat,
+            "spatial_ll": spatial_ll,
+            "n_obs": len(observed),
+            "mean_log_density": np.mean(log_likelihoods),
+            "std_log_density": np.std(log_likelihoods)
+        }
+    
+    except Exception as e:
+        return {"l_test_stat": np.nan, "spatial_ll": np.nan, "n_obs": len(observed), "error": str(e)}
+
+
+def plot_spatial_ltest_results(ltest_results: list, sequence: str, 
+                               dates: list, output_path: str = None):
+    """Plot spatial L-test results over time."""
+    
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10))
+    
+    mainshock = min(dates)
+    days = [(d - mainshock).total_seconds() / 86400 for d in dates]
+    
+    l_stats = [r["l_test_stat"] for r in ltest_results]
+    spatial_lls = [r["spatial_ll"] for r in ltest_results]
+    
+    # --- Top: L-test Statistic ---
+    ax1.plot(days, l_stats, 'o-', color=COLORS['secondary'], linewidth=2.5,
+            markersize=8, markeredgecolor='white', markeredgewidth=2)
+    ax1.set_ylabel("L-Test Statistic\n(higher = better fit)", fontsize=12, fontweight='medium')
+    ax1.set_xlabel("Days After Mainshock", fontsize=12, fontweight='medium')
+    ax1.set_title("Spatial Forecast Quality (Mean Log-Likelihood per Event)", 
+                 fontsize=13, fontweight='bold')
+    ax1.grid(True, alpha=0.3)
+    
+    # Add reference line at typical value
+    median_l = np.nanmedian(l_stats)
+    ax1.axhline(median_l, color='gray', linestyle='--', alpha=0.5, label=f'Median: {median_l:.2f}')
+    ax1.legend()
+    
+    # --- Bottom: Total Spatial Log-Likelihood ---
+    ax2.plot(days, spatial_lls, 's-', color=COLORS['simulated'], linewidth=2.5,
+            markersize=8, markeredgecolor='white', markeredgewidth=2)
+    ax2.set_ylabel("Total Spatial Log-Likelihood", fontsize=12, fontweight='medium')
+    ax2.set_xlabel("Days After Mainshock", fontsize=12, fontweight='medium')
+    ax2.set_title("Cumulative Spatial Fit Quality", fontsize=13, fontweight='bold')
+    ax2.grid(True, alpha=0.3)
+    
+    fig.suptitle(f"Spatial L-Test Analysis: {sequence} Sequence",
+                fontsize=15, fontweight='bold', y=0.995)
+    
+    plt.tight_layout()
+    
+    if output_path:
+        plt.savefig(output_path)
+        print(f"Saved: {output_path}")
+    plt.close(fig)
+    return fig
+
+
+def plot_adaptive_vs_fixed_comparison(adaptive_results: list, fixed_results: list,
+                                      sequence: str, dates: list, output_path: str = None):
+    """Compare adaptive parameter updating vs fixed parameters."""
+    
+    fig = plt.figure(figsize=(16, 12))
+    gs = GridSpec(3, 2, figure=fig, hspace=0.35, wspace=0.25)
+    
+    mainshock = min(dates)
+    days = [(d - mainshock).total_seconds() / 86400 for d in dates]
+    
+    # Extract data
+    adaptive_q = [r["quantile"] for r in adaptive_results]
+    fixed_q = [r["quantile"] for r in fixed_results]
+    
+    adaptive_obs = [r["observed"] for r in adaptive_results]
+    adaptive_sim = [r["simulated_median"] for r in adaptive_results]
+    fixed_sim = [r["simulated_median"] for r in fixed_results]
+    
+    # --- Panel A: Quantile Comparison ---
+    ax1 = fig.add_subplot(gs[0, :])
+    ax1.axhspan(0.025, 0.975, alpha=0.15, color=COLORS['consistent'])
+    ax1.plot(days, adaptive_q, 'o-', color='#2ECC71', linewidth=2.5, markersize=8,
+            label='Adaptive Parameters', markeredgecolor='white', markeredgewidth=2)
+    ax1.plot(days, fixed_q, 's-', color='#E74C3C', linewidth=2.5, markersize=8,
+            label='Fixed Parameters (Model 0)', markeredgecolor='white', markeredgewidth=2)
+    ax1.set_ylabel("N-Test Quantile", fontsize=12, fontweight='medium')
+    ax1.set_xlabel("Days After Mainshock", fontsize=12, fontweight='medium')
+    ax1.set_title("(A) Forecast Consistency: Adaptive vs Fixed", fontsize=13, fontweight='bold', loc='left')
+    ax1.legend(loc='best', fontsize=11)
+    ax1.set_ylim(-0.05, 1.05)
+    ax1.grid(True, alpha=0.3)
+    
+    # --- Panel B: Consistency Rate ---
+    ax2 = fig.add_subplot(gs[1, 0])
+    adaptive_consistent = sum(1 for r in adaptive_results if r["consistent"])
+    fixed_consistent = sum(1 for r in fixed_results if r["consistent"])
+    
+    categories = ['Adaptive', 'Fixed']
+    consistent = [adaptive_consistent, fixed_consistent]
+    total = [len(adaptive_results), len(fixed_results)]
+    inconsistent = [t - c for t, c in zip(total, consistent)]
+    
+    x = np.arange(len(categories))
+    width = 0.5
+    
+    p1 = ax2.bar(x, consistent, width, label='Consistent', color='#2ECC71', alpha=0.8)
+    p2 = ax2.bar(x, inconsistent, width, bottom=consistent, label='Inconsistent',
+                color='#E74C3C', alpha=0.8)
+    
+    ax2.set_ylabel('Number of Forecasts', fontsize=12, fontweight='medium')
+    ax2.set_title('(B) Consistency Rate Comparison', fontsize=13, fontweight='bold', loc='left')
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(categories)
+    ax2.legend()
+    
+    for i, (c, t) in enumerate(zip(consistent, total)):
+        pct = 100 * c / t
+        ax2.text(i, t + 0.5, f'{pct:.0f}%', ha='center', fontsize=12, fontweight='bold')
+    
+    # --- Panel C: Event Count Prediction ---
+    ax3 = fig.add_subplot(gs[1, 1])
+    ax3.plot(days, adaptive_obs, 'o-', color='black', linewidth=2, markersize=6,
+            label='Observed', zorder=3)
+    ax3.plot(days, adaptive_sim, 's-', color='#2ECC71', linewidth=2, markersize=6,
+            label='Adaptive Forecast', alpha=0.7)
+    ax3.plot(days, fixed_sim, '^-', color='#E74C3C', linewidth=2, markersize=6,
+            label='Fixed Forecast', alpha=0.7)
+    ax3.set_ylabel("Event Count (7-day window)", fontsize=12, fontweight='medium')
+    ax3.set_xlabel("Days After Mainshock", fontsize=12, fontweight='medium')
+    ax3.set_title("(C) Forecast Accuracy Comparison", fontsize=13, fontweight='bold', loc='left')
+    ax3.legend(loc='upper right')
+    ax3.grid(True, alpha=0.3)
+    
+    # --- Panel D: Improvement Metric ---
+    ax4 = fig.add_subplot(gs[2, :])
+    
+    # Calculate improvement (difference in absolute error)
+    adaptive_error = [abs(obs - sim) for obs, sim in zip(adaptive_obs, adaptive_sim)]
+    fixed_error = [abs(obs - sim) for obs, sim in zip(adaptive_obs, fixed_sim)]
+    improvement = [fixed - adapt for fixed, adapt in zip(fixed_error, adaptive_error)]
+    
+    colors_imp = ['#2ECC71' if imp > 0 else '#E74C3C' for imp in improvement]
+    ax4.bar(days, improvement, width=max(days)/len(days)*0.8, color=colors_imp, alpha=0.7,
+           edgecolor='white', linewidth=1)
+    ax4.axhline(0, color='black', linestyle='-', linewidth=1)
+    ax4.set_ylabel("Improvement\n(Fixed Error - Adaptive Error)", fontsize=12, fontweight='medium')
+    ax4.set_xlabel("Days After Mainshock", fontsize=12, fontweight='medium')
+    ax4.set_title("(D) Adaptive Parameter Benefit (positive = better)", 
+                 fontsize=13, fontweight='bold', loc='left')
+    ax4.grid(True, alpha=0.3, axis='y')
+    
+    # Summary stats
+    mean_improvement = np.mean(improvement)
+    pct_better = 100 * sum(1 for i in improvement if i > 0) / len(improvement)
+    ax4.text(0.02, 0.98, f'Mean Improvement: {mean_improvement:+.1f} events\n' +
+                          f'Adaptive Better: {pct_better:.0f}% of time',
+            transform=ax4.transAxes, fontsize=11, va='top',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+    
+    fig.suptitle(f"Adaptive vs Fixed Parameter Forecasting: {sequence} Sequence",
+                fontsize=16, fontweight='bold', y=0.995)
+    
+    plt.tight_layout()
+    
+    if output_path:
+        plt.savefig(output_path)
+        print(f"Saved: {output_path}")
+    plt.close(fig)
+    return fig
+
+
+
     """Run full visualization suite for a sequence."""
     
     print(f"\n{'='*60}")
