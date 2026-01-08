@@ -1,5 +1,8 @@
 # ETAS: Epidemic-Type Aftershock Sequence
 
+> [!NOTE]
+> This repository was forked from [git+https://github.com/lmizrahi/etas](https://github.com/lmizrahi/etas) and has been modified for use in New Zealand (NZ).
+
 [![DOI](https://zenodo.org/badge/341629005.svg)](https://zenodo.org/badge/latestdoi/341629005)
 
 ### This code was written for the following articles:
@@ -24,6 +27,32 @@ In case of questions or comments, contact me: leila.mizrahi@sed.ethz.ch.
 
 To install, run
 <code>pip install git+https://github.com/lmizrahi/etas</code>
+<br/>
+<br/>
+
+### Key Modifications in this Fork
+This version has been optimized and adapted for high-performance simulation of New Zealand seismicity:
+
+1.  **Performance Optimization (Numba JIT)**
+    -   Critical computational kernels (`triggering_kernel`, `neg_log_likelihood`, `simulate_aftershock_radius`) have been optimized using **Numba JIT compilation**.
+    -   Achieves **10-100x speedup** for large catalogs compared to the original pandas-based implementation.
+    -   Includes a pre-compilation step to prevent race conditions in parallel environments.
+
+2.  **Parallelization**
+    -   Added `run_parallel_simulations.py` for massive parallel execution of inversions and simulations.
+    -   Uses `joblib` with memory-aware worker scaling to maximize resource utilization without OOM crashes.
+    -   Optimized for multi-core systems (tested on 80-core machines).
+
+3.  **Stability & Bug Fixes**
+    -   Fixed **race conditions** in parallel reductions within the likelihood function.
+    -   Fixed **type mismatch bugs** (string/int index handling) that caused NaN magnitudes during simulations.
+    -   Added robust error handling and warning filters for clean production logs.
+
+4.  **New Zealand Specific**
+    -   Configured for NZ GeoNet data ingestion.
+    -   Polygon filtering for NZ region.
+    -   Retrospective forecasting experiment setup for Kaikoura and Canterbury sequences.
+
 <br/>
 <br/>
 
