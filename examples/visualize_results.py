@@ -502,7 +502,7 @@ def plot_cumulative_comparison(simulations: pd.DataFrame, observed: pd.DataFrame
 
 def plot_spatial_comparison(simulations: pd.DataFrame, observed: pd.DataFrame,
                             sequence: str, output_path: str = None):
-    """Create enhanced spatial comparison with side-by-side maps."""
+    """Create symmetric density comparison with confidence contours."""
     
     fig, axes = plt.subplots(1, 2, figsize=(16, 8))
     
@@ -516,36 +516,87 @@ def plot_spatial_comparison(simulations: pd.DataFrame, observed: pd.DataFrame,
     lon_min, lon_max = all_lons.min() - lon_margin, all_lons.max() + lon_margin
     lat_min, lat_max = all_lats.min() - lat_margin, all_lats.max() + lat_margin
     
-    # --- Left: Simulated Density ---
+    # Create common color scale for density comparison
+    if len(simulations) > 0 and len(observed) > 0:
+        # Sample densities to get vmax
+        test_hex_sim = axes[0].hexbin(simulations["longitude"], simulations["latitude"], 
+                                       gridsize=35, visible=False)
+        test_hex_obs = axes[1].hexbin(observed["longitude"], observed["latitude"], 
+                                       gridsize=35, visible=False)
+        vmax = max(test_hex_sim.get_array().max(), test_hex_obs.get_array().max())
+        test_hex_sim.remove()
+        test_hex_obs.remove()
+    else:
+        vmax = None
+    
+    # --- Left: Simulated Density with Confidence Contour ---
     ax1 = axes[0]
     if len(simulations) > 0:
-        h = ax1.hexbin(simulations["longitude"], simulations["latitude"], 
-                       gridsize=35, cmap=SIM_CMAP, mincnt=1, alpha=0.9,
-                       linewidths=0.1, edgecolors='white')
-        cbar1 = plt.colorbar(h, ax=ax1, shrink=0.8, pad=0.02)
-        cbar1.set_label("Simulated Event Density", fontsize=10)
+        h1 = ax1.hexbin(simulations["longitude"], simulations["latitude"], 
+                        gridsize=35, cmap=SIM_CMAP, mincnt=1, alpha=0.85,
+                        linewidths=0.1, edgecolors='white', vmax=vmax)
+        
+        # Add 90% confidence contour
+        try:
+            from scipy.stats import gaussian_kde
+            from matplotlib.patches import Polygon as MplPolygon
+            
+            # KDE for confidence regions
+            lon_vals = simulations["longitude"].values
+            lat_vals = simulations["latitude"].values
+            
+            # Subsample if too many points
+            if len(lon_vals) > 5000:
+                idx = np.random.choice(len(lon_vals), 5000, replace=False)
+                lon_vals = lon_vals[idx]
+                lat_vals = lat_vals[idx]
+            
+            kde = gaussian_kde(np.vstack([lon_vals, lat_vals]))
+            
+            # Create density grid
+            lon_grid = np.linspace(lon_min, lon_max, 50)
+            lat_grid = np.linspace(lat_min, lat_max, 50)
+            LON, LAT = np.meshgrid(lon_grid, lat_grid)
+            positions = np.vstack([LON.ravel(), LAT.ravel()])
+            density = kde(positions).reshape(LON.shape)
+            
+            # Find 90% contour level
+            sorted_density = np.sort(density.ravel())[::-1]
+            cumsum = np.cumsum(sorted_density)
+            cumsum /= cumsum[-1]
+            threshold_90 = sorted_density[np.searchsorted(cumsum, 0.90)]
+            
+            # Plot contour
+            contour = ax1.contour(LON, LAT, density, levels=[threshold_90], 
+                                  colors='darkred', linewidths=2.5, linestyles='--', alpha=0.8)
+            ax1.clabel(contour, inline=True, fontsize=8, fmt='90%')
+        except:
+            pass  # Skip contour if scipy not available
+        
+        cbar1 = plt.colorbar(h1, ax=ax1, shrink=0.8, pad=0.02)
+        cbar1.set_label("Event Density", fontsize=10)
     
     ax1.set_xlim(lon_min, lon_max)
     ax1.set_ylim(lat_min, lat_max)
     ax1.set_xlabel("Longitude (°E)", fontsize=11, fontweight='medium')
     ax1.set_ylabel("Latitude (°S)", fontsize=11, fontweight='medium')
-    ax1.set_title("Simulated Seismicity\n(Aggregated over all catalogs)", 
+    ax1.set_title(f"Simulated Density\n({len(simulations)} events, all catalogs)", 
                   fontsize=12, fontweight='bold', pad=10)
     ax1.set_aspect('equal', adjustable='box')
-    
-    # Add grid
     ax1.grid(True, alpha=0.3, linestyle='--')
     
-    # --- Right: Observed Events ---
+    # --- Right: Observed Density ---
     ax2 = axes[1]
     if len(observed) > 0:
-        sizes = (observed["magnitude"] - 3.5) ** 2.5 * 25
-        scatter = ax2.scatter(observed["longitude"], observed["latitude"], 
-                              c=observed["magnitude"], s=sizes, cmap='plasma',
-                              edgecolor='black', linewidth=0.8, alpha=0.85,
-                              vmin=4.0, vmax=observed["magnitude"].max())
-        cbar2 = plt.colorbar(scatter, ax=ax2, shrink=0.8, pad=0.02)
-        cbar2.set_label("Magnitude", fontsize=10)
+        h2 = ax2.hexbin(observed["longitude"], observed["latitude"], 
+                        gridsize=35, cmap=SIM_CMAP, mincnt=1, alpha=0.85,
+                        linewidths=0.1, edgecolors='white', vmax=vmax)
+        
+        # Overlay individual events as points
+        sizes = (observed["magnitude"] - 4.0) ** 2 * 15
+        ax2.scatter(observed["longitude"], observed["latitude"], 
+                    s=sizes, c='black', alpha=0.4, edgecolor='white', 
+                    linewidth=0.5, zorder=3, label='Individual Events')
         
         # Annotate largest event
         max_idx = observed["magnitude"].idxmax()
@@ -554,13 +605,17 @@ def plot_spatial_comparison(simulations: pd.DataFrame, observed: pd.DataFrame,
                      (max_event["longitude"], max_event["latitude"]),
                      xytext=(10, 10), textcoords='offset points',
                      fontsize=9, fontweight='bold', color=COLORS['observed'],
-                     arrowprops=dict(arrowstyle='->', color=COLORS['observed']))
+                     arrowprops=dict(arrowstyle='->', color=COLORS['observed'], lw=2),
+                     zorder=4)
+        
+        cbar2 = plt.colorbar(h2, ax=ax2, shrink=0.8, pad=0.02)
+        cbar2.set_label("Event Density", fontsize=10)
     
     ax2.set_xlim(lon_min, lon_max)
     ax2.set_ylim(lat_min, lat_max)
     ax2.set_xlabel("Longitude (°E)", fontsize=11, fontweight='medium')
     ax2.set_ylabel("Latitude (°S)", fontsize=11, fontweight='medium')
-    ax2.set_title(f"Observed Seismicity\n({len(observed)} events, M ≥ 4.1)", 
+    ax2.set_title(f"Observed Density\n({len(observed)} events, M ≥ 4.1)", 
                   fontsize=12, fontweight='bold', pad=10)
     ax2.set_aspect('equal', adjustable='box')
     ax2.grid(True, alpha=0.3, linestyle='--')
@@ -690,7 +745,348 @@ def plot_magnitude_time(catalog: pd.DataFrame, sequence: str,
     return fig
 
 
-# --- Main Execution ---
+def plot_m_test(simulations: pd.DataFrame, observed: pd.DataFrame,
+                sequence: str, forecast_date: datetime, output_path: str = None):
+    """Create enhanced M-test with Q-Q plot for magnitude distribution."""
+    
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+    
+    mc = 4.1
+    mag_bins = np.arange(mc, 7.5, 0.2)
+    
+    # --- Left: Magnitude Distribution Comparison ---
+    if len(observed) > 0:
+        obs_hist, _ = np.histogram(observed["magnitude"], bins=mag_bins, density=True)
+        ax1.hist(observed["magnitude"], bins=mag_bins, alpha=0.7, 
+                 color=COLORS['observed'], edgecolor='white', linewidth=1,
+                 label=f'Observed (n={len(observed)})', density=True)
+    
+    if len(simulations) > 0:
+        sim_hist, _ = np.histogram(simulations["magnitude"], bins=mag_bins, density=True)
+        ax1.hist(simulations["magnitude"], bins=mag_bins, alpha=0.5, 
+                 color=COLORS['simulated'], edgecolor='white', linewidth=1,
+                 label=f'Simulated (n={len(simulations)})', density=True)
+    
+    ax1.set_xlabel("Magnitude", fontsize=12, fontweight='medium')
+    ax1.set_ylabel("Probability Density", fontsize=12, fontweight='medium')
+    ax1.set_title("Magnitude Distribution", fontsize=12, fontweight='bold')
+    ax1.legend(loc='upper right', framealpha=0.95)
+    ax1.grid(True, alpha=0.3)
+    
+    # --- Right: Q-Q Plot ---
+    if len(observed) > 0 and len(simulations) > 0:
+        # Quantiles for comparison
+        quantiles = np.linspace(0, 1, min(len(observed), 100))
+        obs_quantiles = np.quantile(observed["magnitude"], quantiles)
+        sim_quantiles = np.quantile(simulations["magnitude"], quantiles)
+        
+        # Plot Q-Q
+        ax2.scatter(sim_quantiles, obs_quantiles, c=COLORS['primary'], 
+                    s=50, alpha=0.7, edgecolor='white', linewidth=1)
+        
+        # 1:1 reference line
+        mag_min = min(obs_quantiles.min(), sim_quantiles.min())
+        mag_max = max(obs_quantiles.max(), sim_quantiles.max())
+        ax2.plot([mag_min, mag_max], [mag_min, mag_max], 
+                 'k--', linewidth=2, alpha=0.5, label='1:1 Line')
+        
+        # Calculate and display correlation
+        from scipy.stats import pearsonr
+        corr, pval = pearsonr(sim_quantiles, obs_quantiles)
+        ax2.text(0.05, 0.95, f'r = {corr:.3f}\np = {pval:.3e}',
+                 transform=ax2.transAxes, fontsize=11, va='top',
+                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
+    ax2.set_xlabel("Simulated Magnitude Quantiles", fontsize=12, fontweight='medium')
+    ax2.set_ylabel("Observed Magnitude Quantiles", fontsize=12, fontweight='medium')
+    ax2.set_title("Magnitude Q-Q Plot", fontsize=12, fontweight='bold')
+    ax2.legend(loc='lower right', framealpha=0.95)
+    ax2.grid(True, alpha=0.3)
+    ax2.set_aspect('equal', adjustable='box')
+    
+    fig.suptitle(f"M-Test: {sequence} - {forecast_date.strftime('%Y-%m-%d')}", 
+                 fontsize=14, fontweight='bold', y=1.02)
+    
+    plt.tight_layout()
+    
+    if output_path:
+        plt.savefig(output_path)
+        print(f"Saved: {output_path}")
+    plt.close(fig)
+    return fig
+
+
+def plot_parameter_correlation(params_df: pd.DataFrame, sequence: str,
+                                output_path: str = None):
+    """Create correlation heatmap of ETAS parameters."""
+    
+    fig, ax = plt.subplots(figsize=(10, 8))
+    
+    # Select parameters for correlation
+    param_cols = ["log10_k0", "a", "omega", "log10_tau", "gamma", "rho"]
+    param_labels = [r"$\log_{10}(k_0)$", r"$\alpha$", r"$\omega$", 
+                    r"$\log_{10}(\tau)$", r"$\gamma$", r"$\rho$"]
+    
+    # Filter to available parameters
+    available = [p for p in param_cols if p in params_df.columns]
+    available_labels = [param_labels[i] for i, p in enumerate(param_cols) if p in params_df.columns]
+    
+    if len(available) < 2:
+        ax.text(0.5, 0.5, "Insufficient parameters for correlation", 
+                ha='center', va='center', fontsize=12)
+        plt.close(fig)
+        return None
+    
+    # Compute correlation matrix
+    corr_matrix = params_df[available].corr()
+    
+    # Create heatmap
+    im = ax.imshow(corr_matrix, cmap='RdBu_r', vmin=-1, vmax=1, aspect='auto')
+    
+    # Set ticks
+    ax.set_xticks(np.arange(len(available)))
+    ax.set_yticks(np.arange(len(available)))
+    ax.set_xticklabels(available_labels, fontsize=11)
+    ax.set_yticklabels(available_labels, fontsize=11)
+    
+    # Rotate x labels
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
+    
+    # Add correlation values
+    for i in range(len(available)):
+        for j in range(len(available)):
+            text = ax.text(j, i, f'{corr_matrix.iloc[i, j]:.2f}',
+                          ha="center", va="center", color="black" if abs(corr_matrix.iloc[i, j]) < 0.5 else "white",
+                          fontsize=10, fontweight='bold')
+    
+    # Colorbar
+    cbar = plt.colorbar(im, ax=ax, shrink=0.8)
+    cbar.set_label("Correlation Coefficient", fontsize=11)
+    
+    ax.set_title(f"Parameter Correlation Matrix: {sequence} Sequence", 
+                 fontsize=14, fontweight='bold', pad=15)
+    
+    plt.tight_layout()
+    
+    if output_path:
+        plt.savefig(output_path)
+        print(f"Saved: {output_path}")
+    plt.close(fig)
+    return fig
+
+
+def plot_summary_table(n_test_results: list, sequence: str, output_path: str = None):
+    """Create summary statistics table for all N-tests."""
+    
+    fig, ax = plt.subplots(figsize=(14, max(8, len(n_test_results) * 0.4)))
+    ax.axis('off')
+    
+    # Prepare table data
+    table_data = []
+    headers = ['Model', 'Date', 'Observed', 'Simulated\nMedian', 'Simulated\np05-p95', 
+               'Quantile', 'Status']
+    
+    for result in n_test_results:
+        model_idx = result['model_idx']
+        date_str = result['date'].strftime('%Y-%m-%d')
+        obs = result['observed']
+        sim_med = f"{result['simulated_median']:.0f}"
+        sim_range = f"{result['p5']:.0f}-{result['p95']:.0f}"
+        quantile = f"{result['quantile']:.3f}"
+        status = '✓' if result['consistent'] else '✗'
+        
+        table_data.append([f"{model_idx}", date_str, f"{obs}", sim_med, sim_range, quantile, status])
+    
+    # Create table
+    table = ax.table(cellText=table_data, colLabels=headers, 
+                     cellLoc='center', loc='center',
+                     colWidths=[0.08, 0.15, 0.12, 0.12, 0.15, 0.12, 0.1])
+    
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1, 2.5)
+    
+    # Style header
+    for i in range(len(headers)):
+        cell = table[(0, i)]
+        cell.set_facecolor(COLORS['primary'])
+        cell.set_text_props(weight='bold', color='white', fontsize=11)
+    
+    # Color code rows by consistency
+    for i, result in enumerate(n_test_results):
+        row_idx = i + 1
+        color = COLORS['consistent'] if result['consistent'] else COLORS['inconsistent']
+        
+        # Status column
+        cell = table[(row_idx, 6)]
+        cell.set_facecolor(color)
+        cell.set_text_props(weight='bold', color='white', fontsize=12)
+        
+        # Alternate row shading
+        bg_color = '#F8F9FA' if i % 2 == 0 else 'white'
+        for j in range(len(headers) - 1):
+            table[(row_idx, j)].set_facecolor(bg_color)
+    
+    # Summary stats
+    n_consistent = sum(1 for r in n_test_results if r['consistent'])
+    n_total = len(n_test_results)
+    mean_quantile = np.mean([r['quantile'] for r in n_test_results])
+    
+    summary_text = (f"Summary: {n_consistent}/{n_total} ({100*n_consistent/n_total:.0f}%) consistent forecasts  |  "
+                   f"Mean Quantile: {mean_quantile:.3f}")
+    
+    fig.text(0.5, 0.05, summary_text, ha='center', fontsize=12, 
+             bbox=dict(boxstyle='round', facecolor=COLORS['light'], alpha=0.8))
+    
+    ax.set_title(f"N-Test Summary: {sequence} Sequence", 
+                 fontsize=16, fontweight='bold', pad=20)
+    
+    plt.tight_layout(rect=[0, 0.08, 1, 1])
+    
+    if output_path:
+        plt.savefig(output_path)
+        print(f"Saved: {output_path}")
+    plt.close(fig)
+    return fig
+
+
+def plot_temporal_residuals(n_test_results: list, sequence: str, dates: list,
+                            output_path: str = None):
+    """Plot temporal evolution of forecast residuals (Observed - Simulated)."""
+    
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 9), height_ratios=[2, 1])
+    
+    mainshock = min(dates)
+    days = [(d - mainshock).total_seconds() / 86400 for d in dates]
+    
+    observed = [r["observed"] for r in n_test_results]
+    simulated_median = [r["simulated_median"] for r in n_test_results]
+    residuals = [obs - sim for obs, sim in zip(observed, simulated_median)]
+    residual_pct = [100 * (obs - sim) / sim if sim > 0 else 0 
+                    for obs, sim in zip(observed, simulated_median)]
+    
+    # --- Top: Absolute Residuals ---
+    ax1.axhline(0, color='black', linestyle='-', linewidth=1, alpha=0.5)
+    ax1.fill_between(days, 0, residuals, 
+                     where=[r >= 0 for r in residuals],
+                     alpha=0.3, color=COLORS['warning'], label='Over-prediction')
+    ax1.fill_between(days, 0, residuals,
+                     where=[r < 0 for r in residuals],
+                     alpha=0.3, color=COLORS['simulated'], label='Under-prediction')
+    
+    ax1.plot(days, residuals, 'o-', color=COLORS['primary'], 
+             linewidth=2, markersize=8, markeredgecolor='white', markeredgewidth=2)
+    
+    # Add value labels
+    for d, res in zip(days[::2], residuals[::2]):
+        ax1.annotate(f'{res:+.0f}', (d, res), textcoords="offset points",
+                    xytext=(0, 10 if res > 0 else -15), ha='center',
+                    fontsize=8, color='gray')
+    
+    ax1.set_ylabel("Residual (Obs - Sim)", fontsize=12, fontweight='medium')
+    ax1.set_title(f"Temporal Forecast Residuals: {sequence} Sequence", 
+                  fontsize=14, fontweight='bold', pad=12)
+    ax1.legend(loc='upper right', framealpha=0.95)
+    ax1.grid(True, alpha=0.3)
+    ax1.set_xlim(min(days) - 0.5, max(days) + 0.5)
+    
+    # --- Bottom: Percentage Residuals ---
+    ax2.axhline(0, color='black', linestyle='-', linewidth=1, alpha=0.5)
+    ax2.bar(days, residual_pct, width=0.6, 
+            color=[COLORS['warning'] if r >= 0 else COLORS['simulated'] for r in residual_pct],
+            alpha=0.7, edgecolor='white', linewidth=1)
+    
+    ax2.set_xlabel("Days After Mainshock", fontsize=12, fontweight='medium')
+    ax2.set_ylabel("Residual (%)", fontsize=12, fontweight='medium')
+    ax2.grid(True, alpha=0.3, axis='y')
+    ax2.set_xlim(min(days) - 0.5, max(days) + 0.5)
+    
+    plt.tight_layout()
+    
+    if output_path:
+        plt.savefig(output_path)
+        print(f"Saved: {output_path}")
+    plt.close(fig)
+    return fig
+
+
+def plot_seismicity_rate(simulations: pd.DataFrame, observed: pd.DataFrame,
+                        forecast_start: datetime, sequence: str,
+                        output_path: str = None):
+    """Plot seismicity rate evolution (events/day) with uncertainty."""
+    
+    fig, ax = plt.subplots(figsize=(14, 7))
+    
+    forecast_end = forecast_start + timedelta(days=FORECAST_DAYS)
+    
+    # Create time bins (hourly for smoothness, then aggregate to daily)
+    time_bins = pd.date_range(forecast_start, forecast_end, freq='6h')
+    
+    # Observed rate
+    if len(observed) > 0:
+        obs_binned, _ = np.histogram(observed["time"], bins=time_bins)
+        obs_rate = obs_binned / 0.25  # events per day (6h bins)
+        bin_centers = time_bins[:-1] + (time_bins[1] - time_bins[0]) / 2
+        
+        ax.step(bin_centers, obs_rate, where='mid', linewidth=2.5, 
+                color=COLORS['observed'], label=f'Observed Rate', zorder=3)
+        ax.scatter(bin_centers, obs_rate, s=40, c=COLORS['observed'], 
+                  edgecolor='white', zorder=4)
+    
+    # Simulated rate distribution
+    if len(simulations) > 0:
+        # Convert simulation times
+        simulations['time_dt'] = pd.to_datetime(simulations['time'])
+        
+        # Calculate rate for each catalog
+        unique_catalogs = simulations['catalog_id'].unique()
+        rates_per_bin = []
+        
+        for cat_id in unique_catalogs[:1000]:  # Sample for performance
+            cat_data = simulations[simulations['catalog_id'] == cat_id]
+            binned, _ = np.histogram(cat_data['time_dt'], bins=time_bins)
+            rates_per_bin.append(binned / 0.25)
+        
+        rates_per_bin = np.array(rates_per_bin)
+        
+        # Calculate percentiles
+        median_rate = np.median(rates_per_bin, axis=0)
+        p5_rate = np.percentile(rates_per_bin, 5, axis=0)
+        p95_rate = np.percentile(rates_per_bin, 95, axis=0)
+        
+        bin_centers = time_bins[:-1] + (time_bins[1] - time_bins[0]) / 2
+        
+        # Plot
+        ax.fill_between(bin_centers, p5_rate, p95_rate, alpha=0.25, 
+                        color=COLORS['simulated'], label='90% Prediction Interval')
+        ax.plot(bin_centers, median_rate, '--', linewidth=2, 
+                color=COLORS['simulated'], label='Simulated Median Rate')
+    
+    # Formatting
+    ax.set_xlabel("Date", fontsize=12, fontweight='medium')
+    ax.set_ylabel("Seismicity Rate (events/day, M ≥ 4.1)", fontsize=12, fontweight='medium')
+    ax.set_title(f"Seismicity Rate Evolution: {sequence} Sequence\n"
+                 f"Forecast: {forecast_start.strftime('%Y-%m-%d')} to {forecast_end.strftime('%Y-%m-%d')}", 
+                 fontsize=13, fontweight='bold', pad=12)
+    
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d\n%H:%M"))
+    ax.xaxis.set_major_locator(mdates.DayLocator(interval=1))
+    
+    ax.legend(loc='upper right', framealpha=0.95)
+    ax.set_xlim(forecast_start, forecast_end)
+    ax.set_ylim(bottom=0)
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    
+    if output_path:
+        plt.savefig(output_path)
+        print(f"Saved: {output_path}")
+    plt.close(fig)
+    return fig
+
+
+
 
 def run_visualization(sequence: str = "Kaikoura", max_models: int = None):
     """Run full visualization suite for a sequence."""
@@ -752,6 +1148,21 @@ def run_visualization(sequence: str = "Kaikoura", max_models: int = None):
         print("\n3. Creating N-test summary...")
         plot_n_test_summary(n_test_results, sequence, [r["date"] for r in n_test_results],
             os.path.join(OUTPUT_DIR, f"ntest_summary_{sequence.lower()}.png"))
+        
+        # 3a. Parameter Correlation Heatmap
+        print("\n3a. Creating parameter correlation heatmap...")
+        plot_parameter_correlation(params_df, sequence,
+            os.path.join(OUTPUT_DIR, f"param_corr_{sequence.lower()}.png"))
+        
+        # 3b. Summary Statistics Table
+        print("\n3b. Creating summary statistics table...")
+        plot_summary_table(n_test_results, sequence,
+            os.path.join(OUTPUT_DIR, f"summary_table_{sequence.lower()}.png"))
+        
+        # 3c. Temporal Residuals
+        print("\n3c. Creating temporal residual plot...")
+        plot_temporal_residuals(n_test_results, sequence, [r["date"] for r in n_test_results],
+            os.path.join(OUTPUT_DIR, f"residuals_{sequence.lower()}.png"))
     
     # 4. Detailed plots for first few models
     print("\n4. Creating detailed comparison plots...")
@@ -774,6 +1185,14 @@ def run_visualization(sequence: str = "Kaikoura", max_models: int = None):
         
         plot_magnitude_comparison(sims, observed, sequence, forecast_start,
             os.path.join(OUTPUT_DIR, f"magnitude_{sequence.lower()}_{model_idx}.png"))
+        
+        # NEW: M-test with Q-Q plot
+        plot_m_test(sims, observed, sequence, forecast_start,
+            os.path.join(OUTPUT_DIR, f"mtest_{sequence.lower()}_{model_idx}.png"))
+        
+        # NEW: Seismicity rate evolution
+        plot_seismicity_rate(sims, observed, forecast_start, sequence,
+            os.path.join(OUTPUT_DIR, f"rate_{sequence.lower()}_{model_idx}.png"))
     
     print(f"\n{'='*60}")
     print(f"Complete! Figures saved to: {OUTPUT_DIR}/")
