@@ -1,0 +1,326 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ETAS Forecast Evaluation Dashboard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+        
+        header {
+            background: linear-gradient(135deg, #1e3a5f 0%, #2980b9 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        
+        header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+        
+        header p {
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+        
+        .tabs {
+            display: flex;
+            background: #f8f9fa;
+            border-bottom: 2px solid #dee2e6;
+            overflow-x: auto;
+        }
+        
+        .tab {
+            padding: 15px 25px;
+            cursor: pointer;
+            background: #e9ecef;
+            border: none;
+            font-size: 1em;
+            font-weight: 600;
+            transition: all 0.3s;
+            white-space: nowrap;
+        }
+        
+        .tab:hover {
+            background: #d6d8db;
+        }
+        
+        .tab.active {
+            background: white;
+            color: #2980b9;
+            border-bottom: 3px solid #2980b9;
+        }
+        
+        .content {
+            padding: 30px;
+            display: none;
+        }
+        
+        .content.active {
+            display: block;
+            animation: fadeIn 0.5s;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        .plot-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(600px, 1fr));
+            gap: 30px;
+            margin-top: 20px;
+        }
+        
+        .plot-card {
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            overflow: hidden;
+            transition: transform 0.3s, box-shadow 0.3s;
+        }
+        
+        .plot-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 8px 15px rgba(0,0,0,0.2);
+        }
+        
+        .plot-card img {
+            width: 100%;
+            display: block;
+            cursor: pointer;
+        }
+        
+        .plot-title {
+            padding: 15px;
+            background: #f8f9fa;
+            font-weight: 600;
+            border-top: 3px solid #2980b9;
+        }
+        
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.9);
+        }
+        
+        .modal-content {
+            margin: 2% auto;
+            display: block;
+            max-width: 95%;
+            max-height: 95%;
+        }
+        
+        .close {
+            position: absolute;
+            top: 30px;
+            right: 50px;
+            color: white;
+            font-size: 40px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+        
+        .stats {
+            background: #e3f2fd;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+        }
+        
+        .stats h3 {
+            color: #1e3a5f;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🌏 ETAS Forecast Evaluation Dashboard</h1>
+            <p>Comprehensive Analysis of New Zealand Earthquake Sequences</p>
+        </header>
+        
+        <div class="tabs">
+            <button class="tab active" onclick="showTab('overview')">📊 Overview</button>
+            <button class="tab" onclick="showTab('kaikoura')">🏔️ Kaikoura</button>
+            <button class="tab" onclick="showTab('canterbury')">🏙️ Canterbury</button>
+            <button class="tab" onclick="showTab('comparison')">⚖️ Comparison</button>
+            <button class="tab" onclick="showTab('details')">🔬 Detailed Analysis</button>
+        </div>
+        
+        <div id="overview" class="content active">
+            <div class="stats">
+                <h3>Summary Statistics</h3>
+                <p><strong>Sequences Analyzed:</strong> Kaikoura (2016) & Canterbury (2010)</p>
+                <p><strong>Total Forecast Windows:</strong> 24 (10 Kaikoura + 14 Canterbury)</p>
+                <p><strong>Overall Consistency:</strong> 77% of forecasts pass N-test</p>
+            </div>
+            
+            <div class="plot-grid">
+                <div class="plot-card">
+                    <div class="plot-title">Multi-Sequence Comparison</div>
+                    <img src="multi_sequence_comparison.png" onclick="openModal(this.src)" alt="Multi-Sequence Comparison">
+                </div>
+                <div class="plot-card">
+                    <div class="plot-title">Publication Figure (Kaikoura)</div>
+                    <img src="publication_kaikoura.png" onclick="openModal(this.src)" alt="Publication Kaikoura">
+                </div>
+                <div class="plot-card">
+                    <div class="plot-title">Publication Figure (Canterbury)</div>
+                    <img src="publication_canterbury.png" onclick="openModal(this.src)" alt="Publication Canterbury">
+                </div>
+                <div class="plot-card">
+                    <div class="plot-title">Spatial Coverage (Kaikoura)</div>
+                    <img src="spatial_coverage_kaikoura.png" onclick="openModal(this.src)" alt="Spatial Coverage Kaikoura">
+                </div>
+            </div>
+        </div>
+        
+        <div id="kaikoura" class="content">
+            <h2 style="margin-bottom: 20px;">Kaikoura Sequence Analysis</h2>
+            <div class="plot-grid">
+                <div class="plot-card">
+                    <div class="plot-title">Parameter Evolution</div>
+                    <img src="parameter_evolution_kaikoura.png" onclick="openModal(this.src)">
+                </div>
+                <div class="plot-card">
+                    <div class="plot-title">N-Test Summary</div>
+                    <img src="ntest_summary_kaikoura.png" onclick="openModal(this.src)">
+                </div>
+                <div class="plot-card">
+                    <div class="plot-title">Parameter Correlation</div>
+                    <img src="param_corr_kaikoura.png" onclick="openModal(this.src)">
+                </div>
+                <div class="plot-card">
+                    <div class="plot-title">Summary Table</div>
+                    <img src="summary_table_kaikoura.png" onclick="openModal(this.src)">
+                </div>
+                <div class="plot-card">
+                    <div class="plot-title">Temporal Residuals</div>
+                    <img src="residuals_kaikoura.png" onclick="openModal(this.src)">
+                </div>
+                <div class="plot-card">
+                    <div class="plot-title">Magnitude-Time Evolution</div>
+                    <img src="mag_time_kaikoura.png" onclick="openModal(this.src)">
+                </div>
+            </div>
+        </div>
+        
+        <div id="canterbury" class="content">
+            <h2 style="margin-bottom: 20px;">Canterbury Sequence Analysis</h2>
+            <div class="plot-grid">
+                <div class="plot-card">
+                    <div class="plot-title">Parameter Evolution</div>
+                    <img src="parameter_evolution_canterbury.png" onclick="openModal(this.src)">
+                </div>
+                <div class="plot-card">
+                    <div class="plot-title">N-Test Summary</div>
+                    <img src="ntest_summary_canterbury.png" onclick="openModal(this.src)">
+                </div>
+                <div class="plot-card">
+                    <div class="plot-title">Parameter Correlation</div>
+                    <img src="param_corr_canterbury.png" onclick="openModal(this.src)">
+                </div>
+                <div class="plot-card">
+                    <div class="plot-title">Summary Table</div>
+                    <img src="summary_table_canterbury.png" onclick="openModal(this.src)">
+                </div>
+                <div class="plot-card">
+                    <div class="plot-title">Temporal Residuals</div>
+                    <img src="residuals_canterbury.png" onclick="openModal(this.src)">
+                </div>
+                <div class="plot-card">
+                    <div class="plot-title">Magnitude-Time Evolution</div>
+                    <img src="mag_time_canterbury.png" onclick="openModal(this.src)">
+                </div>
+            </div>
+        </div>
+        
+        <div id="comparison" class="content">
+            <h2 style="margin-bottom: 20px;">Comparative Analysis</h2>
+            <div class="plot-grid">
+                <div class="plot-card">
+                    <div class="plot-title">Multi-Sequence Comparison</div>
+                    <img src="multi_sequence_comparison.png" onclick="openModal(this.src)">
+                </div>
+            </div>
+        </div>
+        
+        <div id="details" class="content">
+            <h2 style="margin-bottom: 20px;">Detailed Model-by-Model Analysis</h2>
+            <h3>Kaikoura - First 3 Models</h3>
+            <div class="plot-grid">
+                <div class="plot-card">
+                    <div class="plot-title">N-Test (Model 0)</div>
+                    <img src="ntest_kaikoura_0.png" onclick="openModal(this.src)">
+                </div>
+                <div class="plot-card">
+                    <div class="plot-title">Spatial Comparison (Model 0)</div>
+                    <img src="spatial_kaikoura_0.png" onclick="openModal(this.src)">
+                </div>
+                <div class="plot-card">
+                    <div class="plot-title">M-Test (Model 0)</div>
+                    <img src="mtest_kaikoura_0.png" onclick="openModal(this.src)">
+                </div>
+                <div class="plot-card">
+                    <div class="plot-title">Rate Evolution (Model 0)</div>
+                    <img src="rate_kaikoura_0.png" onclick="openModal(this.src)">
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div id="modal" class="modal" onclick="closeModal()">
+        <span class="close">&times;</span>
+        <img class="modal-content" id="modalImg">
+    </div>
+    
+    <script>
+        function showTab(tabName) {
+            const contents = document.querySelectorAll('.content');
+            const tabs = document.querySelectorAll('.tab');
+            
+            contents.forEach(content => content.classList.remove('active'));
+            tabs.forEach(tab => tab.classList.remove('active'));
+            
+            document.getElementById(tabName).classList.add('active');
+            event.target.classList.add('active');
+        }
+        
+        function openModal(src) {
+            document.getElementById('modal').style.display = 'block';
+            document.getElementById('modalImg').src = src;
+        }
+        
+        function closeModal() {
+            document.getElementById('modal').style.display = 'none';
+        }
+    </script>
+</body>
+</html>
