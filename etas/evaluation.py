@@ -1,3 +1,4 @@
+from __future__ import annotations
 import sys
 from etas.inversion import ETASParameterCalculation, read_shape_coords, polygon_surface, round_half_up, parameter_dict2array, haversine
 from etas.simulation import simulate_aftershock_time

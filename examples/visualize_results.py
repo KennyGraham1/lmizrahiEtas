@@ -2300,3 +2300,271 @@ if __name__ == "__main__":
     print(f"\n📂 All figures saved to: {OUTPUT_DIR}/")
     print(f"🌐 Open dashboard: {dashboard_path}")
     print("="*60 + "\n")
+
+def plot_csep_6panel(simulations: pd.DataFrame, observed: pd.DataFrame, 
+                     forecast_config: dict, output_path: str = None):
+    """
+    Create a comprehensive 6-panel CSEP-style validation plot.
+    
+    Panels:
+    1. N-Test (Event Count Histogram)
+    2. M-Test (Max Magnitude Histogram)
+    3. Magnitude Distribution Comparison (Density Histogram)
+    4. Combined Spatial Distribution (Observed + Forecast Sample)
+    5. Forecast Spatial Density (Heatmap/Points)
+    6. Observed Spatial Distribution (Points)
+    """
+    
+    fig = plt.figure(figsize=(18, 12))
+    gs = GridSpec(3, 2, figure=fig, hspace=0.3, wspace=0.2)
+    
+    # Common Data
+    obs_count = len(observed)
+    sim_counts = simulations.groupby("catalog_id").size()
+    sim_max_mags = simulations.groupby("catalog_id")["magnitude"].max()
+    obs_max_mag = observed["magnitude"].max() if obs_count > 0 else 0
+    
+    mc = forecast_config.get("mc", 4.1)
+    
+    # Panel 1: N-Test (Number of Events)
+    ax1 = fig.add_subplot(gs[0, 0])
+    ax1.hist(sim_counts, bins=30, density=False, alpha=0.6, color=COLORS['simulated'], 
+             edgecolor='black', label="Forecast simulations")
+    ax1.axvline(obs_count, color=COLORS['observed'], linewidth=3, 
+                label=f"Observed: {obs_count}")
+    ax1.axvline(sim_counts.mean(), color='blue', linestyle='--', 
+                label=f"Mean: {sim_counts.mean():.0f}")
+    
+    quantile = (sim_counts < obs_count).mean()
+    ax1.set_title(f"N-test: quantile={quantile:.3f}")
+    ax1.set_xlabel("Number of Events")
+    ax1.set_ylabel("Frequency")
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # Panel 2: M-Test (Max Magnitude)
+    ax2 = fig.add_subplot(gs[0, 1])
+    ax2.hist(sim_max_mags, bins=20, density=False, alpha=0.7, color='orange', 
+             edgecolor='black', label="Forecast simulations")
+    ax2.axvline(obs_max_mag, color='blue', linewidth=3, 
+                label=f"Observed: M{obs_max_mag:.1f}")
+    p95 = sim_max_mags.quantile(0.95)
+    ax2.axvline(p95, color='red', linestyle='--', label="95th percentile")
+    
+    # M-test statistic
+    delta_1 = ((sim_max_mags < obs_max_mag).sum()) / len(sim_max_mags)
+    delta_2 = ((sim_max_mags <= obs_max_mag).sum()) / len(sim_max_mags)
+    delta = (delta_1 + delta_2) / 2
+    
+    ax2.set_title(f"M-test: δ={delta:.3f}")
+    ax2.set_xlabel("Maximum Magnitude")
+    ax2.set_ylabel("Frequency")
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+
+    # Panel 3: Magnitude Distribution Comparison
+    ax3 = fig.add_subplot(gs[1, 0])
+    mag_bins = np.arange(mc, 8.0, 0.2)
+    
+    # Normalized histogram (Density)
+    ax3.hist(simulations["magnitude"], bins=mag_bins, density=True, alpha=0.5, 
+             color=COLORS['simulated'], label=f"Forecast ({len(simulations.groupby('catalog_id'))} sims)")
+    
+    if obs_count > 0:
+        ax3.hist(observed["magnitude"], bins=mag_bins, density=True, histtype='step',
+                 linewidth=2, color=COLORS['observed'], label="Observed")
+        
+    ax3.set_title("Magnitude Distribution Comparison")
+    ax3.set_xlabel("Magnitude")
+    ax3.set_ylabel("Probability Density")
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
+
+    # Spatial Setup
+    # Calculate extent from data
+    all_lons = pd.concat([simulations["longitude"], observed["longitude"]])
+    all_lats = pd.concat([simulations["latitude"], observed["latitude"]])
+    lon_margin = 0.5
+    lat_margin = 0.5
+    
+    # Data extent in standard coordinates
+    lon_min, lon_max = all_lons.min()-lon_margin, all_lons.max()+lon_margin
+    lat_min, lat_max = all_lats.min()-lat_margin, all_lats.max()+lat_margin
+    central_lon = (lon_min + lon_max) / 2  # Center on data
+    
+    try:
+        import cartopy.crs as ccrs
+        import cartopy.feature as cfeature
+        has_cartopy = True
+        # Center projection on data to handle near-antimeridian regions (e.g. NZ)
+        proj = ccrs.PlateCarree(central_longitude=central_lon)
+        data_crs = ccrs.PlateCarree()  # Data is always in standard geographic coordinates
+        # Extent in standard geographic coordinates (passed with explicit crs)
+        extent = [lon_min, lon_max, lat_min, lat_max]
+    except ImportError:
+        has_cartopy = False
+        proj = None
+        data_crs = None
+        extent = [lon_min, lon_max, lat_min, lat_max]
+
+    # Region boundary
+    region_border = None
+    if "shape_coords" in forecast_config:
+        try:
+            rc = forecast_config["shape_coords"]
+            if isinstance(rc, str) and os.path.exists(rc) and rc.endswith('.npy'):
+                region_border = np.load(rc)
+            elif isinstance(rc, np.ndarray):
+                region_border = rc
+            elif isinstance(rc, list):
+                region_border = np.array(rc)
+        except Exception:
+            pass
+
+    # Helper for map setup
+    def setup_map(ax):
+        if has_cartopy:
+             # Add geographic features (matching viz.py styling)
+             ax.add_feature(cfeature.LAND, facecolor='lightgray', alpha=0.5)
+             ax.add_feature(cfeature.OCEAN, facecolor='lightblue', alpha=0.3)
+             ax.add_feature(cfeature.COASTLINE, linewidth=0.8)
+             ax.add_feature(cfeature.BORDERS, linestyle=':', linewidth=0.5)
+             try:
+                 gl = ax.gridlines(draw_labels=True, linewidth=0.5, color='gray', alpha=0.3, linestyle='--')
+                 gl.top_labels = False
+                 gl.right_labels = False
+             except: pass
+        else:
+             # Fallback styling (no Cartopy)
+             ax.set_facecolor('whitesmoke')
+             ax.grid(True, linestyle="--", alpha=0.3, color='gray')
+             ax.set_aspect('equal')
+             ax.set_xlim(extent[0], extent[1])
+             ax.set_ylim(extent[2], extent[3])
+             ax.set_xlabel("Longitude")
+             ax.set_ylabel("Latitude")
+             # Add a subtle border
+             for spine in ax.spines.values():
+                 spine.set_linewidth(1.5)
+                 spine.set_color('gray')
+        
+        # Plot region border
+        if region_border is not None:
+            poly_closed = np.vstack([region_border, region_border[0]]) # Close loop
+            if has_cartopy:
+                ax.plot(poly_closed[:, 1], poly_closed[:, 0], 'k-', linewidth=2,
+                        label='Region', transform=data_crs)
+            else:
+                ax.plot(poly_closed[:, 1], poly_closed[:, 0], 'k-', linewidth=2,
+                        label='Region')
+
+    # Panel 4: Combined Spatial Distribution
+    try:
+        if has_cartopy:
+            ax4 = fig.add_subplot(gs[1, 1], projection=proj)
+        else:
+            raise ImportError("Manual Fallback")
+    except Exception as e:
+        print(f"Comparison map fallback due to: {e}")
+        has_cartopy = False # Global fallback
+        ax4 = fig.add_subplot(gs[1, 1])
+        ax4.set_xlim(extent[0], extent[1])
+        ax4.set_ylim(extent[2], extent[3])
+    
+    setup_map(ax4)
+    if has_cartopy:
+        ax4.set_extent(extent, crs=data_crs)
+
+    # Plot a sample of forecast events
+    sample_sim = simulations.sample(n=min(5000, len(simulations)))
+    # Size by magnitude (exponential)
+    sim_sizes = 2 * (10 ** (sample_sim["magnitude"] - mc))
+    sim_sizes = np.clip(sim_sizes, 2, 100)
+    
+    if has_cartopy:
+        ax4.scatter(sample_sim["longitude"], sample_sim["latitude"], s=sim_sizes, alpha=0.2,
+                    color=COLORS['simulated'], label="Forecast sample", transform=data_crs)
+    else:
+        ax4.scatter(sample_sim["longitude"], sample_sim["latitude"], s=sim_sizes, alpha=0.2,
+                    color=COLORS['simulated'], label="Forecast sample")
+
+    # Plot observed
+    obs_sizes = 5 * (10 ** (observed["magnitude"] - mc))
+    obs_sizes = np.clip(obs_sizes, 10, 300)
+
+    if has_cartopy:
+        ax4.scatter(observed["longitude"], observed["latitude"], s=obs_sizes, alpha=0.9,
+                    color=COLORS['observed'], edgecolors='k', linewidth=0.5,
+                    label=f"Observed ({obs_count})", transform=data_crs)
+    else:
+        ax4.scatter(observed["longitude"], observed["latitude"], s=obs_sizes, alpha=0.9,
+                    color=COLORS['observed'], edgecolors='k', linewidth=0.5,
+                    label=f"Observed ({obs_count})")
+    
+    ax4.set_title("Combined Spatial Distribution")
+    ax4.legend(loc='lower left', fontsize=8)
+
+    # Panel 5: Forecast Distribution
+    if has_cartopy:
+        ax5 = fig.add_subplot(gs[2, 0], projection=proj)
+    else:
+        ax5 = fig.add_subplot(gs[2, 0])
+        
+    setup_map(ax5)
+    if has_cartopy:
+        ax5.set_extent(extent, crs=data_crs)
+    
+    if has_cartopy:
+        sc5 = ax5.scatter(sample_sim["longitude"], sample_sim["latitude"],
+                          c=sample_sim["magnitude"], cmap='Blues', s=sim_sizes, alpha=0.5,
+                          edgecolors='steelblue', linewidth=0.3,
+                          transform=data_crs)
+    else:
+        sc5 = ax5.scatter(sample_sim["longitude"], sample_sim["latitude"],
+                          c=sample_sim["magnitude"], cmap='Blues', s=sim_sizes, alpha=0.5,
+                          edgecolors='steelblue', linewidth=0.3)
+    plt.colorbar(sc5, ax=ax5, label="Magnitude", shrink=0.8)
+    
+    n_sims = simulations['catalog_id'].nunique()
+    mean_events = sim_counts.mean()
+    ax5.text(0.02, 0.98, f"N sims: {n_sims}\nMean: {mean_events:.0f} events", 
+             transform=ax5.transAxes, ha='left', va='top', fontsize=9,
+             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
+    ax5.set_title("Forecast Distribution (sample)")
+
+    # Panel 6: Observed Distribution
+    if has_cartopy:
+        ax6 = fig.add_subplot(gs[2, 1], projection=proj)
+    else:
+        ax6 = fig.add_subplot(gs[2, 1])
+    
+    setup_map(ax6)
+    if has_cartopy:
+        ax6.set_extent(extent, crs=data_crs)
+        
+    if has_cartopy:
+        sc6 = ax6.scatter(observed["longitude"], observed["latitude"],
+                          c=observed["magnitude"], cmap='Reds', s=obs_sizes,
+                          alpha=0.7, edgecolors='k', linewidth=0.5,
+                          transform=data_crs)
+    else:
+        sc6 = ax6.scatter(observed["longitude"], observed["latitude"],
+                          c=observed["magnitude"], cmap='Reds', s=obs_sizes,
+                          alpha=0.7, edgecolors='k', linewidth=0.5)
+    plt.colorbar(sc6, ax=ax6, label="Magnitude")
+    
+    ax6.text(0.02, 0.98, f"Max M: {obs_max_mag:.1f}\nMean M: {observed['magnitude'].mean():.1f}", 
+             transform=ax6.transAxes, ha='left', va='top', fontsize=9,
+             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
+    ax6.set_title(f"Observed Distribution ({obs_count} events)")
+    
+    fig.suptitle("CSEP-Style Forecast Evaluation", fontsize=16, fontweight='bold')
+    
+    if output_path:
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        print(f"6-Panel Plot saved to: {output_path}")
+        
+    plt.close(fig)
+    return fig
