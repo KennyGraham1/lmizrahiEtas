@@ -25,6 +25,8 @@ from matplotlib.colors import LinearSegmentedColormap, Normalize
 from datetime import datetime, timedelta
 import warnings
 
+from date_grids import CANTERBURY_DATES, KAIKOURA_DATES
+
 warnings.filterwarnings("ignore")
 
 # --- Professional Styling ---
@@ -72,46 +74,10 @@ SIM_CMAP = LinearSegmentedColormap.from_list(
 # --- Configuration ---
 PARAM_DIR = "output_nz"
 SIM_DIR = "simulations_nz"
+SIM_DIR_FIXED = "simulations_nz_fixed"
 CATALOG_PATH = "../input_data/nzcat.csv"
 OUTPUT_DIR = "figures"
 FORECAST_DAYS = 7.0
-
-# Kaikoura sequence dates
-KAIKOURA_DATES = [
-    datetime(2016, 11, 13, 12, 0, 0), datetime(2016, 11, 14, 12, 0, 0),
-    datetime(2016, 11, 15, 12, 0, 0), datetime(2016, 11, 16, 0, 0, 0),
-    datetime(2016, 11, 16, 12, 0, 0), datetime(2016, 11, 17, 0, 0, 0),
-    datetime(2016, 11, 17, 12, 0, 0), datetime(2016, 11, 18, 0, 0, 0),
-    datetime(2016, 11, 18, 12, 0, 0), datetime(2016, 11, 19, 0, 0, 0),
-    datetime(2016, 11, 19, 12, 0, 0), datetime(2016, 11, 20, 12, 0, 0),
-    datetime(2016, 11, 21, 12, 0, 0), datetime(2016, 11, 22, 12, 0, 0),
-    datetime(2016, 11, 23, 12, 0, 0), datetime(2016, 11, 24, 12, 0, 0),
-    datetime(2016, 11, 25, 12, 0, 0), datetime(2016, 11, 26, 12, 0, 0),
-    datetime(2016, 11, 27, 12, 0, 0), datetime(2016, 11, 28, 12, 0, 0),
-    datetime(2016, 11, 29, 12, 0, 0), datetime(2016, 11, 30, 12, 0, 0),
-    datetime(2016, 12, 1, 12, 0, 0), datetime(2016, 12, 2, 12, 0, 0),
-    datetime(2016, 12, 7, 12, 0, 0), datetime(2016, 12, 11, 12, 0, 0),
-    datetime(2016, 12, 14, 12, 0, 0), datetime(2016, 12, 18, 12, 0, 0),
-    datetime(2016, 12, 21, 12, 0, 0), datetime(2016, 12, 25, 12, 0, 0),
-    datetime(2016, 12, 28, 12, 0, 0), datetime(2017, 1, 1, 12, 0, 0),
-    datetime(2017, 1, 8, 12, 0, 0), datetime(2017, 1, 15, 12, 0, 0),
-    datetime(2017, 1, 22, 12, 0, 0), datetime(2017, 1, 29, 12, 0, 0),
-    datetime(2017, 2, 5, 12, 0, 0), datetime(2017, 2, 12, 12, 0, 0),
-    datetime(2017, 2, 19, 12, 0, 0), datetime(2017, 2, 26, 12, 0, 0),
-    datetime(2017, 3, 5, 12, 0, 0), datetime(2017, 3, 12, 12, 0, 0),
-    datetime(2017, 3, 19, 12, 0, 0), datetime(2017, 3, 26, 12, 0, 0),
-    datetime(2017, 4, 2, 12, 0, 0),
-]
-
-CANTERBURY_DATES = [
-    datetime(2010, 9, 3, 17, 0, 0), datetime(2010, 9, 4, 17, 0, 0),
-    datetime(2010, 9, 5, 17, 0, 0), datetime(2010, 9, 6, 17, 0, 0),
-    datetime(2010, 9, 7, 17, 0, 0), datetime(2010, 9, 8, 17, 0, 0),
-    datetime(2010, 9, 9, 17, 0, 0), datetime(2010, 9, 10, 17, 0, 0),
-    datetime(2010, 9, 11, 17, 0, 0), datetime(2010, 9, 12, 17, 0, 0),
-    datetime(2010, 9, 13, 17, 0, 0), datetime(2010, 9, 14, 17, 0, 0),
-    datetime(2010, 9, 15, 17, 0, 0), datetime(2010, 9, 16, 17, 0, 0),
-]
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -147,27 +113,49 @@ def load_parameters(sequence: str) -> pd.DataFrame:
     return df
 
 
-def load_simulations(sequence: str, model_idx: int) -> pd.DataFrame:
-    """Load all simulation chunks for a specific model.
-    
-    IMPORTANT: Each chunk file contains simulations with catalog_id 0-999.
-    These are INDEPENDENT simulations, so we must offset the IDs to prevent
-    merging events from different simulations when concatenating.
-    """
-    pattern = os.path.join(SIM_DIR, f"sim_nz_{sequence}_{model_idx}_*.csv")
+def _load_simulation_chunks(pattern: str) -> pd.DataFrame:
+    """Load simulation chunk files and make catalog IDs unique across chunks."""
     files = sorted(glob.glob(pattern))  # Sort to ensure consistent ordering
     if not files:
         return pd.DataFrame()
     
     chunks = []
-    for i, f in enumerate(files):
-        df = pd.read_csv(f)
-        # Offset catalog_id by chunk number to create unique IDs across all chunks
-        # Chunk 0: IDs 0-999, Chunk 1: IDs 1000-1999, etc.
-        df["catalog_id"] = df["catalog_id"] + i * 1000
+    catalog_offset = 0
+    for f in files:
+        df = pd.read_csv(f, parse_dates=["time"])
+        if "catalog_id" in df.columns and len(df) > 0:
+            raw_ids = df["catalog_id"].astype(int)
+            id_span = max(int(raw_ids.max()) + 1, raw_ids.nunique())
+            df["catalog_id"] = raw_ids + catalog_offset
+            catalog_offset += id_span
         chunks.append(df)
     
     return pd.concat(chunks, ignore_index=True)
+
+
+def load_simulations(
+    sequence: str,
+    model_idx: int,
+    sim_dir: str = SIM_DIR,
+    prefix: str = "sim_nz",
+) -> pd.DataFrame:
+    """Load all simulation chunks for a specific adaptive model."""
+    pattern = os.path.join(sim_dir, f"{prefix}_{sequence}_{model_idx}_*.csv")
+    return _load_simulation_chunks(pattern)
+
+
+def load_fixed_simulations(
+    sequence: str,
+    model_idx: int,
+    sim_dir: str = SIM_DIR_FIXED,
+) -> pd.DataFrame:
+    """Load all simulation chunks for a fixed regional baseline model."""
+    return load_simulations(
+        sequence,
+        model_idx,
+        sim_dir=sim_dir,
+        prefix="sim_nz_fixed",
+    )
 
 
 def load_catalog() -> pd.DataFrame:
@@ -180,6 +168,24 @@ def get_observed_in_window(catalog: pd.DataFrame, start: datetime,
     """Filter catalog to events within forecast window above Mc."""
     mask = (catalog["time"] > start) & (catalog["time"] <= end) & (catalog["magnitude"] >= mc)
     return catalog[mask].copy()
+
+
+def filter_simulations_to_window(simulations: pd.DataFrame, start: datetime,
+                                 end: datetime, mc: float = 4.1) -> pd.DataFrame:
+    """Filter simulated events to a forecast window above Mc."""
+    if len(simulations) == 0:
+        return simulations.copy()
+
+    sims = simulations.copy()
+    if not pd.api.types.is_datetime64_any_dtype(sims["time"]):
+        sims["time"] = pd.to_datetime(sims["time"])
+
+    mask = (
+        (sims["time"] > start)
+        & (sims["time"] <= end)
+        & (sims["magnitude"] >= mc)
+    )
+    return sims[mask].copy()
 
 
 # --- CSEP-Style Evaluation Functions ---
@@ -2022,7 +2028,8 @@ def plot_spatial_ltest_results(ltest_results: list, sequence: str,
 
 
 def plot_adaptive_vs_fixed_comparison(adaptive_results: list, fixed_results: list,
-                                      sequence: str, dates: list, output_path: str = None):
+                                      sequence: str, dates: list, output_path: str = None,
+                                      horizon_days: float = FORECAST_DAYS):
     """Compare adaptive parameter updating vs fixed parameters."""
     
     fig = plt.figure(figsize=(16, 12))
@@ -2045,7 +2052,7 @@ def plot_adaptive_vs_fixed_comparison(adaptive_results: list, fixed_results: lis
     ax1.plot(days, adaptive_q, 'o-', color='#2ECC71', linewidth=2.5, markersize=8,
             label='Adaptive Parameters', markeredgecolor='white', markeredgewidth=2)
     ax1.plot(days, fixed_q, 's-', color='#E74C3C', linewidth=2.5, markersize=8,
-            label='Fixed Parameters (Model 0)', markeredgecolor='white', markeredgewidth=2)
+            label='Fixed Regional Parameters', markeredgecolor='white', markeredgewidth=2)
     ax1.set_ylabel("N-Test Quantile", fontsize=12, fontweight='medium')
     ax1.set_xlabel("Days After Mainshock", fontsize=12, fontweight='medium')
     ax1.set_title("(A) Forecast Consistency: Adaptive vs Fixed", fontsize=13, fontweight='bold', loc='left')
@@ -2088,7 +2095,7 @@ def plot_adaptive_vs_fixed_comparison(adaptive_results: list, fixed_results: lis
             label='Adaptive Forecast', alpha=0.7)
     ax3.plot(days, fixed_sim, '^-', color='#E74C3C', linewidth=2, markersize=6,
             label='Fixed Forecast', alpha=0.7)
-    ax3.set_ylabel("Event Count (7-day window)", fontsize=12, fontweight='medium')
+    ax3.set_ylabel(f"Event Count ({horizon_days:g}-day window)", fontsize=12, fontweight='medium')
     ax3.set_xlabel("Days After Mainshock", fontsize=12, fontweight='medium')
     ax3.set_title("(C) Forecast Accuracy Comparison", fontsize=13, fontweight='bold', loc='left')
     ax3.legend(loc='upper right')
@@ -2120,7 +2127,9 @@ def plot_adaptive_vs_fixed_comparison(adaptive_results: list, fixed_results: lis
             transform=ax4.transAxes, fontsize=11, va='top',
             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
     
-    fig.suptitle(f"Adaptive vs Fixed Parameter Forecasting: {sequence} Sequence",
+    fig.suptitle(
+                f"Adaptive vs Fixed Parameter Forecasting: {sequence} Sequence "
+                f"({horizon_days:g}-day windows)",
                 fontsize=16, fontweight='bold', y=0.995)
     
     plt.tight_layout()

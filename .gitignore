@@ -8,7 +8,8 @@ __pycache__/
 manuscript/
 # C extensions
 *.so
-
+.claude
+.codex
 examples/**/*.csv
 examples/**/*.json
 # Distribution / packaging

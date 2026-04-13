@@ -38,15 +38,16 @@ nzcat.sort_values(by="time", inplace=True)
 - Loads the New Zealand earthquake catalog (columns: `time`, `latitude`, `longitude`, `magnitude`, etc.)
 - Sorts chronologically for proper temporal slicing.
 
-### 1.2 Experiment Dates (`run_parallel_simulations.py`, lines 55-120)
+### 1.2 Experiment Dates
 ```python
-dates = [
-    dt.datetime(2016, 11, 13, 12, 0, 0),
-    dt.datetime(2016, 11, 14, 12, 0, 0),
-    ...
-]
+from date_grids import KAIKOURA_DATES, CANTERBURY_DATES
 ```
 Each date represents a **forecast origin time**. The model is trained on data *before* this time and forecasts *after* it.
+
+The lists are now generated programmatically from schedule rules in
+`examples/date_grids.py` rather than repeated as hardcoded timestamps in
+multiple files. This keeps the experiment design consistent across the runner
+and visualization code.
 
 ### 1.3 Configuration (`run_parallel_simulations.py`, lines 122-146)
 ```python
@@ -842,4 +843,3 @@ Estimate probabilities of large earthquakes:
 ---
 
 *Document generated for lmizrahiEtas codebase v1.1*
-
