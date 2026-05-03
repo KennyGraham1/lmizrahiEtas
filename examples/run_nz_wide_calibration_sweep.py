@@ -575,36 +575,76 @@ def write_markdown_report(
 ) -> None:
     ordered = comparison_df.sort_values("calibration_score").reset_index(drop=True)
     best = ordered.iloc[0]
+
+    # Derive catalog metadata from the best scenario row
+    mc_val = best.get("mc", 4.1) if "mc" in ordered.columns else 4.1
+    tw_start = best.get("timewindow_start", "1960-01-01") if "timewindow_start" in ordered.columns else "1960-01-01"
+    aux_start = best.get("auxiliary_start", "1950-01-01") if "auxiliary_start" in ordered.columns else "1950-01-01"
+
     lines = [
-        "# NZ-Wide Calibration Sweep",
+        "# NZ-Wide ETAS Calibration Sweep",
         "",
-        f"- Forecast start: `{args.forecast_start}`",
-        f"- Forecast horizons: `{args.durations}` days",
-        f"- Simulations per scenario: `{args.n_simulations}`",
-        f"- Scenario count: `{len(ordered)}`",
+        "## Data & Configuration",
+        "",
+        "| Parameter | Value |",
+        "| --- | --- |",
+        f"| **Catalog** | GeoNet NZ FDSN (`nzcat.csv`) |",
+        f"| **Mc** | {mc_val} |",
+        f"| **Training window** | {str(tw_start)[:10]} → {args.forecast_start[:10]} |",
+        f"| **Auxiliary start** | {str(aux_start)[:10]} |",
+        f"| **Region** | 34°S–48°S, 164°E–180°E (rectangular) |",
+        f"| **Forecast origin** | `{args.forecast_start}` |",
+        f"| **Forecast horizons** | {args.durations} days |",
+        f"| **Simulations / scenario** | {args.n_simulations} |",
+        f"| **Scenario count** | {len(ordered)} |",
         "",
         "## Ranking Rule",
         "",
         (
-            "- `calibration_score = mean_abs_log_count_ratio + consistency_penalty + "
-            "spatial_penalty`, where consistency penalizes failed `N/M/S/PL` windows "
-            "and spatial penalizes empty-cell rate allocation, unsupported observed "
-            "events, and mean absolute spatial residuals."
+            "`calibration_score = mean_abs_log_count_ratio + consistency_penalty + "
+            "spatial_penalty`"
         ),
+        "",
+        "- **Consistency penalty** penalizes failed N/M/S/PL CSEP windows",
+        "- **Spatial penalty** penalizes empty-cell rate allocation, unsupported observed events, and mean absolute spatial residuals",
         "",
         "## Best Scenario",
         "",
-        f"- Best scenario: `{best['scenario_name']}`",
-        f"- Score: `{best['calibration_score']:.3f}`",
-        f"- Mean observed/simulated ratio: `{best['mean_obs_to_sim_ratio']:.3f}`",
-        f"- Mean empty-cell forecast share: `{best['mean_empty_cell_fraction']:.3f}`",
-        f"- Mean unsupported observed-event share: `{best['mean_zero_rate_observed_fraction']:.3f}`",
+        f"| Metric | Value |",
+        f"| --- | --- |",
+        f"| Best scenario | **{best['scenario_name']}** |",
+        f"| Score | {best['calibration_score']:.3f} |",
+        f"| Mean obs/sim ratio | {best['mean_obs_to_sim_ratio']:.3f} |",
+        f"| Empty-cell share | {best['mean_empty_cell_fraction']:.1%} |",
+        f"| Unsupported obs share | {best['mean_zero_rate_observed_fraction']:.1%} |",
+        "",
+        "## CSEP Consistency Tests",
+        "",
+        "| Test | Fraction Passed | Status |",
+        "| --- | ---: | --- |",
+    ]
+
+    test_cols = [
+        ("N-test", "n_consistency_fraction"),
+        ("M-test", "m_consistency_fraction"),
+        ("S-test", "s_consistency_fraction"),
+        ("PL-test", "pl_consistency_fraction"),
+    ]
+    for label, col in test_cols:
+        val = float(best.get(col, 0))
+        status = "✅ Pass" if val >= 0.5 else "⚠️ Fail"
+        lines.append(f"| {label} | {val:.3f} | {status} |")
+
+    lines.extend([
+        "",
+        "> **Interpretation**: A test passes if ≥ 50% of forecast horizons produce",
+        "> consistency at the 95% significance level (quantile between 0.025 and 0.975).",
         "",
         "## Scenario Comparison",
         "",
-        "| Scenario | Score | Obs/Sim ratio | Empty-cell share | Unsupported obs share | N frac | S frac | PL frac | final log10_mu | final log10_k0 |",
+        "| Scenario | Score | Obs/Sim ratio | Empty-cell share | Unsupported obs share | N frac | S frac | PL frac | log₁₀(μ) | log₁₀(k₀) |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
-    ]
+    ])
     for row in ordered.itertuples(index=False):
         lines.append(
             "| "
@@ -644,6 +684,33 @@ def write_markdown_report(
             f"{row.observed_count_in_zero_rate_cells_fraction:.3f} |"
         )
 
+    # Diagnostic notes
+    ratio = best['mean_obs_to_sim_ratio']
+    lines.extend([
+        "",
+        "## Diagnostic Notes",
+        "",
+    ])
+    if ratio < 0.5:
+        lines.append(
+            f"- ⚠️ **Over-prediction**: Obs/Sim ratio = {ratio:.3f}. "
+            "The model forecasts ~3× more events than observed. Consider lowering "
+            "the background rate (log₁₀μ) or narrowing the study region."
+        )
+    if best.get('mean_empty_cell_fraction', 0) > 0.9:
+        lines.append(
+            f"- ⚠️ **High empty-cell share** ({best['mean_empty_cell_fraction']:.1%}): "
+            "The rectangular bounding box includes large oceanic areas with no real "
+            "seismicity. A tighter NZ seismogenic-zone polygon would reduce this penalty "
+            "and improve spatial diagnostics."
+        )
+    if best.get('n_consistency_fraction', 1) < 0.5:
+        lines.append(
+            "- ⚠️ **N-test failure**: The event-count forecast is inconsistent with "
+            "observations across most horizons. This is the primary driver of the "
+            "calibration score."
+        )
+
     with open(output_path, "w") as f:
         f.write("\n".join(lines) + "\n")
 
@@ -653,65 +720,261 @@ def plot_scorecard(
     horizon_df: pd.DataFrame,
     output_path: str,
 ) -> None:
+    """Generate a publication-quality calibration scorecard figure."""
+    from matplotlib.gridspec import GridSpec
+    from matplotlib.patches import FancyBboxPatch
+    from matplotlib.colors import Normalize
+    import matplotlib.patheffects as pe
+
+    # ── Design tokens ──────────────────────────────────────────────────
+    _DEEP_NAVY = "#0D1B2A"
+    _SLATE = "#1B2838"
+    _TEAL = "#1B9AAA"
+    _CORAL = "#E8505B"
+    _AMBER = "#F2A65A"
+    _EMERALD = "#2ECC71"
+    _MUTED = "#8D99AE"
+    _LIGHT_BG = "#F7F9FC"
+    _PANEL_BG = "#FFFFFF"
+    _GRID_CLR = "#E2E8F0"
+    _TEXT_CLR = "#2D3748"
+    _SUBTEXT = "#718096"
+
+    _CONSISTENCY_PALETTE = {
+        "N": "#3B82F6",  # Blue
+        "M": "#F59E0B",  # Amber
+        "S": "#10B981",  # Green
+        "PL": "#EF4444",  # Red
+    }
+    _HORIZON_PALETTE = ["#3B82F6", "#06B6D4", "#8B5CF6"]
+
     ordered = comparison_df.sort_values("calibration_score").reset_index(drop=True)
     scenario_names = ordered["scenario_name"].tolist()
-    y = np.arange(len(ordered))
+    n_scenarios = len(ordered)
 
-    fig, axes = plt.subplots(2, 3, figsize=(20, 12))
-    ax_score, ax_consistency, ax_ratio, ax_spatial, ax_heatmap, ax_params = axes.flatten()
+    # ── Figure layout ──────────────────────────────────────────────────
+    fig = plt.figure(figsize=(22, 14), facecolor=_LIGHT_BG)
+    gs = GridSpec(
+        3, 3,
+        figure=fig,
+        height_ratios=[0.12, 1, 1],
+        hspace=0.35,
+        wspace=0.32,
+        left=0.06,
+        right=0.96,
+        top=0.95,
+        bottom=0.06,
+    )
 
-    ax_score.barh(y, ordered["calibration_score"], color="#2C6EAA", alpha=0.9)
-    ax_score.set_yticks(y, labels=scenario_names)
+    # ── Row 0: Context banner ──────────────────────────────────────────
+    ax_banner = fig.add_subplot(gs[0, :])
+    ax_banner.set_xlim(0, 1)
+    ax_banner.set_ylim(0, 1)
+    ax_banner.axis("off")
+
+    # Title
+    ax_banner.text(
+        0.5, 0.82,
+        "NZ-Wide ETAS Calibration Scorecard",
+        ha="center", va="top",
+        fontsize=20, fontweight="bold", color=_DEEP_NAVY,
+        fontfamily="sans-serif",
+    )
+
+    # Metadata line
+    best = ordered.iloc[0]
+    mc_val = best.get("mc", 4.1) if "mc" in ordered.columns else 4.1
+    tw_start = best.get("timewindow_start", "1960") if "timewindow_start" in ordered.columns else "1960"
+    tw_start_short = str(tw_start)[:4] if tw_start else "?"
+    meta_parts = [
+        f"Catalog: GeoNet NZ  (M$_c$ = {mc_val})",
+        f"Training: {tw_start_short}–2018",
+        f"Region: 34°S–48°S, 164°E–180°E",
+        f"Scenarios: {n_scenarios}",
+    ]
+    ax_banner.text(
+        0.5, 0.25,
+        "  ·  ".join(meta_parts),
+        ha="center", va="center",
+        fontsize=11, color=_SUBTEXT,
+        fontfamily="sans-serif",
+    )
+
+    # Thin separator
+    ax_banner.axhline(0.0, color=_GRID_CLR, linewidth=1.5)
+
+    # ── Helper: Style an axis ──────────────────────────────────────────
+    def _style_ax(ax, title, xlabel="", ylabel=""):
+        ax.set_facecolor(_PANEL_BG)
+        ax.set_title(
+            title, fontsize=13, fontweight="bold", color=_DEEP_NAVY,
+            pad=10, loc="left",
+        )
+        if xlabel:
+            ax.set_xlabel(xlabel, fontsize=10, color=_TEXT_CLR)
+        if ylabel:
+            ax.set_ylabel(ylabel, fontsize=10, color=_TEXT_CLR)
+        for spine in ax.spines.values():
+            spine.set_color(_GRID_CLR)
+            spine.set_linewidth(0.8)
+        ax.tick_params(colors=_TEXT_CLR, labelsize=9)
+        ax.grid(True, alpha=0.35, color=_GRID_CLR, linewidth=0.6)
+
+    # ── Panel 1: Calibration Score ─────────────────────────────────────
+    ax_score = fig.add_subplot(gs[1, 0])
+    _style_ax(ax_score, "Calibration Score", xlabel="Score  (lower is better)")
+
+    y = np.arange(n_scenarios)
+    scores = ordered["calibration_score"].values
+    norm = Normalize(vmin=scores.min() - 0.1, vmax=scores.max() + 0.5)
+
+    bars = ax_score.barh(
+        y, scores,
+        height=0.6,
+        color=[plt.cm.RdYlGn_r(norm(s)) for s in scores],
+        edgecolor="white",
+        linewidth=1.2,
+        zorder=3,
+    )
+    # Value labels
+    for i, (bar, s) in enumerate(zip(bars, scores)):
+        ax_score.text(
+            s + scores.max() * 0.02, i,
+            f"{s:.2f}",
+            va="center", fontsize=10, fontweight="bold", color=_TEXT_CLR,
+        )
+    ax_score.set_yticks(y)
+    ax_score.set_yticklabels(scenario_names, fontsize=10, fontweight="medium")
     ax_score.invert_yaxis()
-    ax_score.set_title("Calibration Score")
-    ax_score.set_xlabel("Lower Is Better")
-    ax_score.grid(True, axis="x", alpha=0.25)
+    ax_score.set_xlim(0, scores.max() * 1.25)
 
-    width = 0.18
-    x = np.arange(len(ordered))
-    ax_consistency.bar(x - 1.5 * width, ordered["n_consistency_fraction"], width=width, label="N")
-    ax_consistency.bar(x - 0.5 * width, ordered["m_consistency_fraction"], width=width, label="M")
-    ax_consistency.bar(x + 0.5 * width, ordered["s_consistency_fraction"], width=width, label="S")
-    ax_consistency.bar(x + 1.5 * width, ordered["pl_consistency_fraction"], width=width, label="PL")
-    ax_consistency.set_xticks(x, labels=scenario_names, rotation=30, ha="right")
-    ax_consistency.set_ylim(0, 1.05)
-    ax_consistency.set_title("Consistency Fractions")
-    ax_consistency.grid(True, axis="y", alpha=0.25)
-    ax_consistency.legend(loc="upper right", frameon=True)
-
-    ax_ratio.plot(
-        ordered["mean_obs_to_sim_ratio"],
-        y,
-        "o",
-        color="#F28E2B",
-        markersize=8,
+    # Best-scenario badge
+    ax_score.annotate(
+        "★ BEST",
+        xy=(scores[0], 0),
+        xytext=(-8, 0),
+        textcoords="offset points",
+        fontsize=8, fontweight="bold", color=_EMERALD,
+        ha="right", va="center",
     )
-    ax_ratio.axvline(1.0, color="#6B7280", linestyle="--", linewidth=1)
-    ax_ratio.set_yticks(y, labels=scenario_names)
+
+    # ── Panel 2: CSEP Consistency ──────────────────────────────────────
+    ax_consistency = fig.add_subplot(gs[1, 1])
+    _style_ax(ax_consistency, "CSEP Consistency Tests", ylabel="Fraction Passed")
+
+    x = np.arange(n_scenarios)
+    bar_width = 0.18
+    test_keys = [
+        ("n_consistency_fraction", "N"),
+        ("m_consistency_fraction", "M"),
+        ("s_consistency_fraction", "S"),
+        ("pl_consistency_fraction", "PL"),
+    ]
+
+    for offset, (col, label) in enumerate(test_keys):
+        vals = ordered[col].values
+        pos = x + (offset - 1.5) * bar_width
+        b = ax_consistency.bar(
+            pos, vals, width=bar_width,
+            color=_CONSISTENCY_PALETTE[label],
+            edgecolor="white", linewidth=0.8,
+            label=f"{label}-test", zorder=3,
+            alpha=0.88,
+        )
+        # Pass/fail symbols on top of bars
+        for xi, v in zip(pos, vals):
+            symbol = "✓" if v >= 0.5 else "✗"
+            clr = _EMERALD if v >= 0.5 else _CORAL
+            ax_consistency.text(
+                xi, v + 0.03, symbol,
+                ha="center", va="bottom", fontsize=9, fontweight="bold",
+                color=clr,
+            )
+
+    ax_consistency.axhline(0.5, color=_CORAL, linestyle="--", linewidth=1, alpha=0.6, label="50% threshold")
+    ax_consistency.set_xticks(x)
+    ax_consistency.set_xticklabels(scenario_names, fontsize=10)
+    ax_consistency.set_ylim(0, 1.15)
+    ax_consistency.legend(
+        loc="upper right", frameon=True, framealpha=0.95,
+        edgecolor=_GRID_CLR, fontsize=8, ncol=3,
+    )
+
+    # ── Panel 3: Obs / Sim Ratio ───────────────────────────────────────
+    ax_ratio = fig.add_subplot(gs[1, 2])
+    _style_ax(ax_ratio, "Obs / Sim Event Count Ratio", xlabel="Ratio  (1.0 = perfect)")
+
+    # Ideal range shading
+    ax_ratio.axvspan(0.5, 2.0, color=_EMERALD, alpha=0.06, zorder=1)
+    ax_ratio.axvspan(0.8, 1.25, color=_EMERALD, alpha=0.10, zorder=1)
+    ax_ratio.axvline(1.0, color=_MUTED, linestyle="--", linewidth=1.2, zorder=2)
+
+    ratios = ordered["mean_obs_to_sim_ratio"].values
+    ax_ratio.scatter(
+        ratios, y,
+        s=120, c=[_EMERALD if 0.5 < r < 2.0 else _CORAL for r in ratios],
+        edgecolors=_DEEP_NAVY, linewidths=1.2, zorder=5,
+    )
+    for i, r in enumerate(ratios):
+        ax_ratio.text(
+            r + 0.02, i,
+            f"{r:.2f}",
+            va="center", fontsize=10, color=_TEXT_CLR, fontweight="medium",
+        )
+    ax_ratio.set_yticks(y)
+    ax_ratio.set_yticklabels(scenario_names, fontsize=10)
     ax_ratio.invert_yaxis()
-    ax_ratio.set_title("Mean Observed / Simulated Ratio")
-    ax_ratio.set_xlabel("Closer to 1 Is Better")
-    ax_ratio.grid(True, axis="x", alpha=0.25)
+
+    # Add interpretation label
+    ax_ratio.text(
+        0.98, 0.02,
+        "< 1 = model over-predicts\n> 1 = model under-predicts",
+        transform=ax_ratio.transAxes, fontsize=8, color=_SUBTEXT,
+        ha="right", va="bottom",
+        bbox=dict(boxstyle="round,pad=0.4", facecolor=_LIGHT_BG, edgecolor=_GRID_CLR, alpha=0.9),
+    )
+
+    # ── Panel 4: Spatial Penalties ─────────────────────────────────────
+    ax_spatial = fig.add_subplot(gs[2, 0])
+    _style_ax(ax_spatial, "Spatial Allocation Diagnostics", ylabel="Percentage (%)")
+
+    empty_vals = 100 * ordered["mean_empty_cell_fraction"].values
+    unsup_vals = 100 * ordered["mean_zero_rate_observed_fraction"].values
 
     ax_spatial.bar(
-        x - width / 2,
-        100 * ordered["mean_empty_cell_fraction"],
-        width=width,
-        color="#F28E2B",
-        label="Empty-cell forecast share",
+        x - 0.15, empty_vals, width=0.28,
+        color=_AMBER, edgecolor="white", linewidth=0.8,
+        label="Empty-cell forecast share", zorder=3,
+        alpha=0.85,
     )
     ax_spatial.bar(
-        x + width / 2,
-        100 * ordered["mean_zero_rate_observed_fraction"],
-        width=width,
-        color="#D62728",
-        label="Unsupported observed share",
+        x + 0.15, unsup_vals, width=0.28,
+        color=_CORAL, edgecolor="white", linewidth=0.8,
+        label="Unsupported observed events", zorder=3,
+        alpha=0.85,
     )
-    ax_spatial.set_xticks(x, labels=scenario_names, rotation=30, ha="right")
-    ax_spatial.set_title("Spatial Allocation Penalties")
-    ax_spatial.set_ylabel("Percent")
-    ax_spatial.grid(True, axis="y", alpha=0.25)
-    ax_spatial.legend(loc="upper right", frameon=True)
+
+    # Value labels
+    for i in range(n_scenarios):
+        ax_spatial.text(
+            x[i] - 0.15, empty_vals[i] + 1.5,
+            f"{empty_vals[i]:.1f}%", ha="center", fontsize=8, color=_AMBER, fontweight="bold",
+        )
+        ax_spatial.text(
+            x[i] + 0.15, unsup_vals[i] + 1.5,
+            f"{unsup_vals[i]:.1f}%", ha="center", fontsize=8, color=_CORAL, fontweight="bold",
+        )
+
+    ax_spatial.set_xticks(x)
+    ax_spatial.set_xticklabels(scenario_names, fontsize=10)
+    ax_spatial.legend(
+        loc="upper right", frameon=True, framealpha=0.95,
+        edgecolor=_GRID_CLR, fontsize=9,
+    )
+
+    # ── Panel 5: Horizon Ratios (bar chart) ────────────────────────────
+    ax_horizon = fig.add_subplot(gs[2, 1])
+    _style_ax(ax_horizon, "Obs / Sim Ratio by Forecast Horizon", ylabel="Ratio")
 
     ratio_pivot = horizon_df.pivot_table(
         index="scenario_name",
@@ -720,46 +983,120 @@ def plot_scorecard(
     )
     ratio_pivot = ratio_pivot.reindex(scenario_names)
     durations = ratio_pivot.columns.tolist()
-    image = ax_heatmap.imshow(ratio_pivot.to_numpy(), aspect="auto", cmap="YlGnBu")
-    ax_heatmap.set_title("Obs/Sim Ratio by Horizon")
-    ax_heatmap.set_yticks(np.arange(len(scenario_names)), labels=scenario_names)
-    ax_heatmap.set_xticks(np.arange(len(durations)), labels=[f"{int(d)}d" for d in durations])
-    for i in range(ratio_pivot.shape[0]):
-        for j in range(ratio_pivot.shape[1]):
-            value = ratio_pivot.iat[i, j]
-            if pd.notna(value):
-                ax_heatmap.text(j, i, f"{value:.2f}", ha="center", va="center", fontsize=9)
-    plt.colorbar(image, ax=ax_heatmap, fraction=0.046, pad=0.04)
 
-    mask = np.isfinite(ordered["final_log10_mu"]) & np.isfinite(ordered["final_log10_k0"])
-    if mask.any():
-        ax_params.scatter(
+    if n_scenarios == 1:
+        # Grouped bar for single scenario
+        horizon_x = np.arange(len(durations))
+        vals = ratio_pivot.iloc[0].values
+        horizon_bars = ax_horizon.bar(
+            horizon_x, vals, width=0.5,
+            color=_HORIZON_PALETTE[:len(durations)],
+            edgecolor="white", linewidth=1.2, zorder=3,
+        )
+        for hx, hv in zip(horizon_x, vals):
+            ax_horizon.text(
+                hx, hv + 0.01, f"{hv:.3f}",
+                ha="center", va="bottom", fontsize=10, fontweight="bold", color=_TEXT_CLR,
+            )
+        ax_horizon.set_xticks(horizon_x)
+        ax_horizon.set_xticklabels([f"{int(d)}-day" for d in durations], fontsize=10)
+        ax_horizon.axhline(1.0, color=_MUTED, linestyle="--", linewidth=1, zorder=2)
+        ax_horizon.set_ylim(0, max(vals) * 1.3 if max(vals) > 0 else 1.5)
+    else:
+        # Grouped bars per scenario for multi-scenario
+        group_width = 0.8
+        bar_w = group_width / len(durations)
+        for j, dur in enumerate(durations):
+            offset = (j - (len(durations) - 1) / 2) * bar_w
+            vals = ratio_pivot[dur].values
+            ax_horizon.bar(
+                x + offset, vals, width=bar_w * 0.9,
+                color=_HORIZON_PALETTE[j % len(_HORIZON_PALETTE)],
+                edgecolor="white", linewidth=0.8,
+                label=f"{int(dur)}-day", zorder=3,
+            )
+        ax_horizon.axhline(1.0, color=_MUTED, linestyle="--", linewidth=1, zorder=2)
+        ax_horizon.set_xticks(x)
+        ax_horizon.set_xticklabels(scenario_names, fontsize=10)
+        ax_horizon.legend(
+            loc="upper right", frameon=True, framealpha=0.95,
+            edgecolor=_GRID_CLR, fontsize=9,
+        )
+
+    # ── Panel 6: Parameter Landscape ───────────────────────────────────
+    ax_params = fig.add_subplot(gs[2, 2])
+
+    mu_finite = np.isfinite(ordered["final_log10_mu"])
+    k0_finite = np.isfinite(ordered["final_log10_k0"])
+    mask = mu_finite & k0_finite
+
+    if mask.any() and mask.sum() > 1:
+        _style_ax(
+            ax_params, "Parameter Landscape",
+            xlabel=r"Final $\log_{10}(\mu)$",
+            ylabel=r"Final $\log_{10}(k_0)$",
+        )
+        sc = ax_params.scatter(
             ordered.loc[mask, "final_log10_mu"],
             ordered.loc[mask, "final_log10_k0"],
             c=ordered.loc[mask, "calibration_score"],
-            cmap="viridis_r",
-            s=80,
-            edgecolors="black",
-            linewidths=0.5,
+            cmap="RdYlGn_r",
+            s=160,
+            edgecolors=_DEEP_NAVY,
+            linewidths=1.5,
+            zorder=5,
         )
         for row in ordered.loc[mask].itertuples(index=False):
             ax_params.annotate(
                 row.scenario_name,
                 (row.final_log10_mu, row.final_log10_k0),
-                xytext=(4, 4),
+                xytext=(6, 6),
                 textcoords="offset points",
-                fontsize=9,
+                fontsize=9, fontweight="medium", color=_TEXT_CLR,
+                path_effects=[pe.withStroke(linewidth=2, foreground="white")],
             )
-        ax_params.set_title("Final log10_mu vs log10_k0")
-        ax_params.set_xlabel("Final log10_mu")
-        ax_params.set_ylabel("Final log10_k0")
-        ax_params.grid(True, alpha=0.25)
+        cbar = plt.colorbar(sc, ax=ax_params, shrink=0.75, pad=0.03)
+        cbar.set_label("Calibration Score", fontsize=9, color=_TEXT_CLR)
+        cbar.ax.tick_params(labelsize=8)
+    elif mask.any() and mask.sum() == 1:
+        # Single scenario: show a summary card instead of a meaningless scatter
+        _style_ax(ax_params, "Fitted Parameters")
+        row = ordered.iloc[0]
+        param_lines = [
+            (r"$\log_{10}(\mu)$", f"{row.get('final_log10_mu', float('nan')):.3f}"),
+            (r"$\log_{10}(k_0)$", f"{row.get('final_log10_k0', float('nan')):.3f}"),
+        ]
+        if "final_a" in ordered.columns:
+            param_lines.append((r"$\alpha$", f"{row.get('final_a', float('nan')):.3f}"))
+        if "final_gamma" in ordered.columns:
+            param_lines.append((r"$\gamma$", f"{row.get('final_gamma', float('nan')):.3f}"))
+        if "final_rho" in ordered.columns:
+            param_lines.append((r"$\rho$", f"{row.get('final_rho', float('nan')):.3f}"))
+        if "beta" in ordered.columns:
+            param_lines.append((r"$\beta$", f"{row.get('beta', float('nan')):.3f}"))
+
+        y_pos = 0.88
+        for label, value in param_lines:
+            ax_params.text(
+                0.3, y_pos, label,
+                transform=ax_params.transAxes,
+                fontsize=13, ha="right", va="center", color=_SUBTEXT,
+            )
+            ax_params.text(
+                0.35, y_pos, f"  =  {value}",
+                transform=ax_params.transAxes,
+                fontsize=13, ha="left", va="center",
+                fontweight="bold", color=_DEEP_NAVY,
+                fontfamily="monospace",
+            )
+            y_pos -= 0.14
+
+        ax_params.set_xticks([])
+        ax_params.set_yticks([])
     else:
         ax_params.axis("off")
 
-    fig.suptitle("NZ-Wide Calibration Sweep Scorecard", fontsize=16, fontweight="bold")
-    fig.tight_layout(rect=[0, 0, 1, 0.97])
-    fig.savefig(output_path, dpi=180)
+    fig.savefig(output_path, dpi=300, facecolor=_LIGHT_BG)
     plt.close(fig)
 
 
