@@ -2313,81 +2313,104 @@ if __name__ == "__main__":
 def plot_csep_6panel(simulations: pd.DataFrame, observed: pd.DataFrame, 
                      forecast_config: dict, output_path: str = None):
     """
-    Create a comprehensive 6-panel CSEP-style validation plot.
-    
-    Panels:
-    1. N-Test (Event Count Histogram)
-    2. M-Test (Max Magnitude Histogram)
-    3. Magnitude Distribution Comparison (Density Histogram)
-    4. Combined Spatial Distribution (Observed + Forecast Sample)
-    5. Forecast Spatial Density (Heatmap/Points)
-    6. Observed Spatial Distribution (Points)
+    Create a publication-quality 6-panel CSEP-style validation plot.
     """
-    
-    fig = plt.figure(figsize=(18, 12))
-    gs = GridSpec(3, 2, figure=fig, hspace=0.3, wspace=0.2)
-    
-    # Common Data
+    import matplotlib.patheffects as pe
+
+    # ── Design tokens ──────────────────────────────────────────────────
+    _BG = "#F7F9FC"
+    _PANEL = "#FFFFFF"
+    _GRID = "#E2E8F0"
+    _TEXT = "#2D3748"
+    _SUB = "#718096"
+    _NAVY = "#0D1B2A"
+    _SIM_CLR = "#3B82F6"
+    _OBS_CLR = "#DC2626"
+    _MEAN_CLR = "#6366F1"
+    _P95_CLR = "#F59E0B"
+    _PASS = "#10B981"
+    _FAIL = "#EF4444"
+
+    def _style(ax, title, xlabel="", ylabel=""):
+        ax.set_facecolor(_PANEL)
+        ax.set_title(title, fontsize=13, fontweight="bold", color=_NAVY, pad=10, loc="left")
+        if xlabel: ax.set_xlabel(xlabel, fontsize=10, color=_TEXT)
+        if ylabel: ax.set_ylabel(ylabel, fontsize=10, color=_TEXT)
+        for s in ax.spines.values():
+            s.set_color(_GRID); s.set_linewidth(0.8)
+        ax.tick_params(colors=_TEXT, labelsize=9)
+        ax.grid(True, alpha=0.35, color=_GRID, linewidth=0.6)
+
+    # ── Common data ────────────────────────────────────────────────────
     obs_count = len(observed)
     sim_counts = simulations.groupby("catalog_id").size()
     sim_max_mags = simulations.groupby("catalog_id")["magnitude"].max()
     obs_max_mag = observed["magnitude"].max() if obs_count > 0 else 0
-    
     mc = forecast_config.get("mc", 4.1)
-    
-    # Panel 1: N-Test (Number of Events)
-    ax1 = fig.add_subplot(gs[0, 0])
-    ax1.hist(sim_counts, bins=30, density=False, alpha=0.6, color=COLORS['simulated'], 
-             edgecolor='black', label="Forecast simulations")
-    ax1.axvline(obs_count, color=COLORS['observed'], linewidth=3, 
-                label=f"Observed: {obs_count}")
-    ax1.axvline(sim_counts.mean(), color='blue', linestyle='--', 
-                label=f"Mean: {sim_counts.mean():.0f}")
-    
+
+    # ── Figure layout ──────────────────────────────────────────────────
+    fig = plt.figure(figsize=(20, 15), facecolor=_BG)
+    gs = GridSpec(4, 2, figure=fig, height_ratios=[0.12, 1, 1, 1],
+                  hspace=0.30, wspace=0.22, left=0.06, right=0.96, top=0.97, bottom=0.04)
+
+    # ── Row 0: Context banner ──────────────────────────────────────────
+    ax_ban = fig.add_subplot(gs[0, :])
+    ax_ban.set_xlim(0, 1); ax_ban.set_ylim(0, 1); ax_ban.axis("off")
+    duration = forecast_config.get("duration_days", "?")
+    f_start = str(forecast_config.get("forecast_start", ""))[:10]
+    n_sims_val = simulations["catalog_id"].nunique()
+    ax_ban.text(0.5, 0.75, "CSEP Forecast Evaluation", ha="center", va="top",
+                fontsize=18, fontweight="bold", color=_NAVY)
+    meta = f"Horizon: {duration} days  ·  Origin: {f_start}  ·  Mc = {mc}  ·  {n_sims_val} simulations  ·  {obs_count} observed"
+    ax_ban.text(0.5, 0.15, meta, ha="center", va="center", fontsize=10, color=_SUB)
+    ax_ban.axhline(0.0, color=_GRID, linewidth=1.5)
+
+    # ── Panel 1: N-Test ────────────────────────────────────────────────
+    ax1 = fig.add_subplot(gs[1, 0])
+    _style(ax1, "N-Test  (Event Count)", xlabel="Number of Events", ylabel="Frequency")
+    ax1.hist(sim_counts, bins=30, color=_SIM_CLR, edgecolor="white", linewidth=0.8,
+             alpha=0.75, label="Forecast simulations", zorder=3)
+    ax1.axvline(obs_count, color=_OBS_CLR, linewidth=2.5, label=f"Observed: {obs_count}", zorder=5)
+    ax1.axvline(sim_counts.mean(), color=_MEAN_CLR, linestyle="--", linewidth=1.5,
+                label=f"Mean: {sim_counts.mean():.0f}", zorder=4)
     quantile = (sim_counts < obs_count).mean()
-    ax1.set_title(f"N-test: quantile={quantile:.3f}")
-    ax1.set_xlabel("Number of Events")
-    ax1.set_ylabel("Frequency")
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-    
-    # Panel 2: M-Test (Max Magnitude)
-    ax2 = fig.add_subplot(gs[0, 1])
-    ax2.hist(sim_max_mags, bins=20, density=False, alpha=0.7, color='orange', 
-             edgecolor='black', label="Forecast simulations")
-    ax2.axvline(obs_max_mag, color='blue', linewidth=3, 
-                label=f"Observed: M{obs_max_mag:.1f}")
+    status = "PASS" if 0.025 < quantile < 0.975 else "FAIL"
+    badge_clr = _PASS if status == "PASS" else _FAIL
+    ax1.text(0.98, 0.95, f"q = {quantile:.3f}\n{status}", transform=ax1.transAxes,
+             ha="right", va="top", fontsize=11, fontweight="bold", color=badge_clr,
+             bbox=dict(boxstyle="round,pad=0.4", facecolor="white", edgecolor=badge_clr, alpha=0.95))
+    ax1.legend(loc="upper left", frameon=True, framealpha=0.95, edgecolor=_GRID, fontsize=9)
+
+    # ── Panel 2: M-Test ────────────────────────────────────────────────
+    ax2 = fig.add_subplot(gs[1, 1])
+    _style(ax2, "M-Test  (Maximum Magnitude)", xlabel="Maximum Magnitude", ylabel="Frequency")
+    ax2.hist(sim_max_mags, bins=20, color=_P95_CLR, edgecolor="white", linewidth=0.8,
+             alpha=0.75, label="Forecast simulations", zorder=3)
+    ax2.axvline(obs_max_mag, color=_SIM_CLR, linewidth=2.5,
+                label=f"Observed: M{obs_max_mag:.1f}", zorder=5)
     p95 = sim_max_mags.quantile(0.95)
-    ax2.axvline(p95, color='red', linestyle='--', label="95th percentile")
-    
-    # M-test statistic
+    ax2.axvline(p95, color=_OBS_CLR, linestyle="--", linewidth=1.5, label="95th percentile", zorder=4)
     delta_1 = ((sim_max_mags < obs_max_mag).sum()) / len(sim_max_mags)
     delta_2 = ((sim_max_mags <= obs_max_mag).sum()) / len(sim_max_mags)
     delta = (delta_1 + delta_2) / 2
-    
-    ax2.set_title(f"M-test: δ={delta:.3f}")
-    ax2.set_xlabel("Maximum Magnitude")
-    ax2.set_ylabel("Frequency")
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
+    m_status = "PASS" if 0.025 < delta < 0.975 else "FAIL"
+    m_badge = _PASS if m_status == "PASS" else _FAIL
+    ax2.text(0.98, 0.95, f"δ = {delta:.3f}\n{m_status}", transform=ax2.transAxes,
+             ha="right", va="top", fontsize=11, fontweight="bold", color=m_badge,
+             bbox=dict(boxstyle="round,pad=0.4", facecolor="white", edgecolor=m_badge, alpha=0.95))
+    ax2.legend(loc="upper left", frameon=True, framealpha=0.95, edgecolor=_GRID, fontsize=9)
 
-    # Panel 3: Magnitude Distribution Comparison
-    ax3 = fig.add_subplot(gs[1, 0])
+    # ── Panel 3: Magnitude Distribution ────────────────────────────────
+    ax3 = fig.add_subplot(gs[2, 0])
+    _style(ax3, "Magnitude Distribution", xlabel="Magnitude", ylabel="Probability Density")
     mag_bins = np.arange(mc, 8.0, 0.2)
-    
-    # Normalized histogram (Density)
-    ax3.hist(simulations["magnitude"], bins=mag_bins, density=True, alpha=0.5, 
-             color=COLORS['simulated'], label=f"Forecast ({len(simulations.groupby('catalog_id'))} sims)")
-    
+    ax3.hist(simulations["magnitude"], bins=mag_bins, density=True, alpha=0.55,
+             color=_SIM_CLR, edgecolor="white", linewidth=0.6,
+             label=f"Forecast ({n_sims_val} sims)", zorder=3)
     if obs_count > 0:
-        ax3.hist(observed["magnitude"], bins=mag_bins, density=True, histtype='step',
-                 linewidth=2, color=COLORS['observed'], label="Observed")
-        
-    ax3.set_title("Magnitude Distribution Comparison")
-    ax3.set_xlabel("Magnitude")
-    ax3.set_ylabel("Probability Density")
-    ax3.legend()
-    ax3.grid(True, alpha=0.3)
+        ax3.hist(observed["magnitude"], bins=mag_bins, density=True, histtype="step",
+                 linewidth=2.5, color=_OBS_CLR, label="Observed", zorder=5)
+    ax3.legend(loc="upper right", frameon=True, framealpha=0.95, edgecolor=_GRID, fontsize=9)
 
     # Spatial Setup
     # Calculate extent from data
@@ -2433,50 +2456,47 @@ def plot_csep_6panel(simulations: pd.DataFrame, observed: pd.DataFrame,
     # Helper for map setup
     def setup_map(ax):
         if has_cartopy:
-             # Add geographic features (matching viz.py styling)
-             ax.add_feature(cfeature.LAND, facecolor='lightgray', alpha=0.5)
-             ax.add_feature(cfeature.OCEAN, facecolor='lightblue', alpha=0.3)
-             ax.add_feature(cfeature.COASTLINE, linewidth=0.8)
-             ax.add_feature(cfeature.BORDERS, linestyle=':', linewidth=0.5)
+             ax.add_feature(cfeature.LAND, facecolor='#F0F0F0', alpha=0.7)
+             ax.add_feature(cfeature.OCEAN, facecolor='#E8F4FD', alpha=0.4)
+             ax.add_feature(cfeature.COASTLINE, linewidth=1.0, color='#4A5568')
+             ax.add_feature(cfeature.BORDERS, linestyle=':', linewidth=0.5, color='#A0AEC0')
              try:
-                 gl = ax.gridlines(draw_labels=True, linewidth=0.5, color='gray', alpha=0.3, linestyle='--')
+                 gl = ax.gridlines(draw_labels=True, linewidth=0.4, color='#CBD5E0', alpha=0.4, linestyle='--')
                  gl.top_labels = False
                  gl.right_labels = False
              except: pass
         else:
-             # Fallback styling (no Cartopy)
-             ax.set_facecolor('whitesmoke')
+             ax.set_facecolor('#FAFAFA')
              ax.grid(True, linestyle="--", alpha=0.3, color='gray')
              ax.set_aspect('equal')
              ax.set_xlim(extent[0], extent[1])
              ax.set_ylim(extent[2], extent[3])
              ax.set_xlabel("Longitude")
              ax.set_ylabel("Latitude")
-             # Add a subtle border
              for spine in ax.spines.values():
-                 spine.set_linewidth(1.5)
-                 spine.set_color('gray')
+                 spine.set_linewidth(1.0)
+                 spine.set_color('#CBD5E0')
         
         # Plot region border
         if region_border is not None:
-            poly_closed = np.vstack([region_border, region_border[0]]) # Close loop
+            poly_closed = np.vstack([region_border, region_border[0]])
             if has_cartopy:
-                ax.plot(poly_closed[:, 1], poly_closed[:, 0], 'k-', linewidth=2,
-                        label='Region', transform=data_crs)
+                ax.plot(poly_closed[:, 1], poly_closed[:, 0], '-', color='#2D3748',
+                        linewidth=1.8, label='Region', transform=data_crs)
             else:
-                ax.plot(poly_closed[:, 1], poly_closed[:, 0], 'k-', linewidth=2,
-                        label='Region')
+                ax.plot(poly_closed[:, 1], poly_closed[:, 0], '-', color='#2D3748',
+                        linewidth=1.8, label='Region')
 
     # Panel 4: Combined Spatial Distribution
     try:
         if has_cartopy:
-            ax4 = fig.add_subplot(gs[1, 1], projection=proj)
+            ax4 = fig.add_subplot(gs[2, 1], projection=proj)
         else:
             raise ImportError("Manual Fallback")
     except Exception as e:
         print(f"Comparison map fallback due to: {e}")
-        has_cartopy = False # Global fallback
-        ax4 = fig.add_subplot(gs[1, 1])
+        has_cartopy = False
+        ax4 = fig.add_subplot(gs[2, 1])
         ax4.set_xlim(extent[0], extent[1])
         ax4.set_ylim(extent[2], extent[3])
     
@@ -2484,40 +2504,39 @@ def plot_csep_6panel(simulations: pd.DataFrame, observed: pd.DataFrame,
     if has_cartopy:
         ax4.set_extent(extent, crs=data_crs)
 
-    # Plot a sample of forecast events
     sample_sim = simulations.sample(n=min(5000, len(simulations)))
-    # Size by magnitude (exponential)
     sim_sizes = 2 * (10 ** (sample_sim["magnitude"] - mc))
     sim_sizes = np.clip(sim_sizes, 2, 100)
     
     if has_cartopy:
-        ax4.scatter(sample_sim["longitude"], sample_sim["latitude"], s=sim_sizes, alpha=0.2,
-                    color=COLORS['simulated'], label="Forecast sample", transform=data_crs)
+        ax4.scatter(sample_sim["longitude"], sample_sim["latitude"], s=sim_sizes, alpha=0.15,
+                    color=_SIM_CLR, label="Forecast sample", transform=data_crs, zorder=3)
     else:
-        ax4.scatter(sample_sim["longitude"], sample_sim["latitude"], s=sim_sizes, alpha=0.2,
-                    color=COLORS['simulated'], label="Forecast sample")
+        ax4.scatter(sample_sim["longitude"], sample_sim["latitude"], s=sim_sizes, alpha=0.15,
+                    color=_SIM_CLR, label="Forecast sample")
 
-    # Plot observed
     obs_sizes = 5 * (10 ** (observed["magnitude"] - mc))
     obs_sizes = np.clip(obs_sizes, 10, 300)
 
     if has_cartopy:
         ax4.scatter(observed["longitude"], observed["latitude"], s=obs_sizes, alpha=0.9,
-                    color=COLORS['observed'], edgecolors='k', linewidth=0.5,
-                    label=f"Observed ({obs_count})", transform=data_crs)
+                    color=_OBS_CLR, edgecolors='white', linewidth=0.8,
+                    label=f"Observed ({obs_count})", transform=data_crs, zorder=5)
     else:
         ax4.scatter(observed["longitude"], observed["latitude"], s=obs_sizes, alpha=0.9,
-                    color=COLORS['observed'], edgecolors='k', linewidth=0.5,
+                    color=_OBS_CLR, edgecolors='white', linewidth=0.8,
                     label=f"Observed ({obs_count})")
     
-    ax4.set_title("Combined Spatial Distribution")
-    ax4.legend(loc='lower left', fontsize=8)
+    ax4.set_title("Combined Spatial Distribution", fontsize=12, fontweight="bold",
+                  color=_NAVY, pad=8)
+    ax4.legend(loc='lower left', fontsize=8, frameon=True, framealpha=0.95,
+               edgecolor=_GRID)
 
     # Panel 5: Forecast Distribution
     if has_cartopy:
-        ax5 = fig.add_subplot(gs[2, 0], projection=proj)
+        ax5 = fig.add_subplot(gs[3, 0], projection=proj)
     else:
-        ax5 = fig.add_subplot(gs[2, 0])
+        ax5 = fig.add_subplot(gs[3, 0])
         
     setup_map(ax5)
     if has_cartopy:
@@ -2525,28 +2544,30 @@ def plot_csep_6panel(simulations: pd.DataFrame, observed: pd.DataFrame,
     
     if has_cartopy:
         sc5 = ax5.scatter(sample_sim["longitude"], sample_sim["latitude"],
-                          c=sample_sim["magnitude"], cmap='Blues', s=sim_sizes, alpha=0.5,
-                          edgecolors='steelblue', linewidth=0.3,
-                          transform=data_crs)
+                          c=sample_sim["magnitude"], cmap='YlGnBu', s=sim_sizes, alpha=0.5,
+                          edgecolors='none', linewidth=0.3,
+                          transform=data_crs, zorder=3)
     else:
         sc5 = ax5.scatter(sample_sim["longitude"], sample_sim["latitude"],
-                          c=sample_sim["magnitude"], cmap='Blues', s=sim_sizes, alpha=0.5,
-                          edgecolors='steelblue', linewidth=0.3)
-    plt.colorbar(sc5, ax=ax5, label="Magnitude", shrink=0.8)
+                          c=sample_sim["magnitude"], cmap='YlGnBu', s=sim_sizes, alpha=0.5,
+                          edgecolors='none', linewidth=0.3)
+    cb5 = plt.colorbar(sc5, ax=ax5, label="Magnitude", shrink=0.75, pad=0.02)
+    cb5.ax.tick_params(labelsize=8)
     
     n_sims = simulations['catalog_id'].nunique()
     mean_events = sim_counts.mean()
     ax5.text(0.02, 0.98, f"N sims: {n_sims}\nMean: {mean_events:.0f} events", 
              transform=ax5.transAxes, ha='left', va='top', fontsize=9,
-             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+             bbox=dict(boxstyle='round,pad=0.3', facecolor='white', edgecolor=_GRID, alpha=0.9))
     
-    ax5.set_title("Forecast Distribution (sample)")
+    ax5.set_title("Forecast Distribution (sample)", fontsize=12, fontweight="bold",
+                  color=_NAVY, pad=8)
 
     # Panel 6: Observed Distribution
     if has_cartopy:
-        ax6 = fig.add_subplot(gs[2, 1], projection=proj)
+        ax6 = fig.add_subplot(gs[3, 1], projection=proj)
     else:
-        ax6 = fig.add_subplot(gs[2, 1])
+        ax6 = fig.add_subplot(gs[3, 1])
     
     setup_map(ax6)
     if has_cartopy:
@@ -2554,25 +2575,25 @@ def plot_csep_6panel(simulations: pd.DataFrame, observed: pd.DataFrame,
         
     if has_cartopy:
         sc6 = ax6.scatter(observed["longitude"], observed["latitude"],
-                          c=observed["magnitude"], cmap='Reds', s=obs_sizes,
-                          alpha=0.7, edgecolors='k', linewidth=0.5,
-                          transform=data_crs)
+                          c=observed["magnitude"], cmap='YlOrRd', s=obs_sizes,
+                          alpha=0.85, edgecolors='white', linewidth=0.8,
+                          transform=data_crs, zorder=5)
     else:
         sc6 = ax6.scatter(observed["longitude"], observed["latitude"],
-                          c=observed["magnitude"], cmap='Reds', s=obs_sizes,
-                          alpha=0.7, edgecolors='k', linewidth=0.5)
-    plt.colorbar(sc6, ax=ax6, label="Magnitude")
+                          c=observed["magnitude"], cmap='YlOrRd', s=obs_sizes,
+                          alpha=0.85, edgecolors='white', linewidth=0.8)
+    cb6 = plt.colorbar(sc6, ax=ax6, label="Magnitude", shrink=0.75, pad=0.02)
+    cb6.ax.tick_params(labelsize=8)
     
     ax6.text(0.02, 0.98, f"Max M: {obs_max_mag:.1f}\nMean M: {observed['magnitude'].mean():.1f}", 
              transform=ax6.transAxes, ha='left', va='top', fontsize=9,
-             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+             bbox=dict(boxstyle='round,pad=0.3', facecolor='white', edgecolor=_GRID, alpha=0.9))
     
-    ax6.set_title(f"Observed Distribution ({obs_count} events)")
-    
-    fig.suptitle("CSEP-Style Forecast Evaluation", fontsize=16, fontweight='bold')
+    ax6.set_title(f"Observed Distribution ({obs_count} events)", fontsize=12,
+                  fontweight="bold", color=_NAVY, pad=8)
     
     if output_path:
-        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        plt.savefig(output_path, dpi=300, bbox_inches='tight', facecolor=_BG)
         print(f"6-Panel Plot saved to: {output_path}")
         
     plt.close(fig)

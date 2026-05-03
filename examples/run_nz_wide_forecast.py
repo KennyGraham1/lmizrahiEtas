@@ -400,8 +400,8 @@ def evaluate_forecasts(
                 observed,
                 {
                     "mc": mc,
-                    "start": forecast_start,
-                    "duration": duration,
+                    "duration_days": duration,
+                    "forecast_start": forecast_start,
                     "shape_coords": POLYGON_PATH,
                 },
                 output_path=plot_path,
