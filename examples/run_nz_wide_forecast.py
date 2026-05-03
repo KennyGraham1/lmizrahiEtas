@@ -137,6 +137,29 @@ def parse_args() -> argparse.Namespace:
         help="Skip the 6-panel CSEP-style evaluation plots.",
     )
     parser.add_argument(
+        "--theta-log10-mu-delta",
+        type=float,
+        default=0.0,
+        help=(
+            "Additive shift applied to the initial log10_mu guess before inversion. "
+            "Default: 0.0"
+        ),
+    )
+    parser.add_argument(
+        "--theta-log10-k0-delta",
+        type=float,
+        default=0.0,
+        help=(
+            "Additive shift applied to the initial log10_k0 guess before inversion. "
+            "Default: 0.0"
+        ),
+    )
+    parser.add_argument(
+        "--force-reinvert",
+        action="store_true",
+        help="Ignore any cached parameter file for this run label and rerun the inversion.",
+    )
+    parser.add_argument(
         "--skip-pycsep-analysis",
         action="store_true",
         help="Skip the automatic pyCSEP catalog analysis step.",
@@ -227,6 +250,16 @@ def load_catalog() -> pd.DataFrame:
     return catalog.loc[mask].copy()
 
 
+def build_initial_theta(
+    log10_mu_delta: float = 0.0,
+    log10_k0_delta: float = 0.0,
+) -> dict:
+    theta = NZ_INITIAL_THETA.copy()
+    theta["log10_mu"] = float(theta["log10_mu"] + log10_mu_delta)
+    theta["log10_k0"] = float(theta["log10_k0"] + log10_k0_delta)
+    return theta
+
+
 def build_run_paths(experiment_name: str, forecast_start: dt.datetime) -> dict[str, str]:
     run_label = f"{slugify(experiment_name)}_{forecast_start:%Y%m%d_%H%M%S}"
     output_dir = ensure_dir(os.path.join(BASE_DIR, "output_nz_wide", run_label))
@@ -248,13 +281,14 @@ def build_inversion_config(
     auxiliary_start: str,
     timewindow_start: str,
     mc: float,
+    initial_theta: dict,
 ) -> dict:
     return {
         "fn_catalog": CATALOG_PATH,
         "auxiliary_start": auxiliary_start,
         "timewindow_start": timewindow_start,
         "timewindow_end": forecast_start.strftime("%Y-%m-%d %H:%M:%S"),
-        "theta_0": NZ_INITIAL_THETA.copy(),
+        "theta_0": initial_theta.copy(),
         "mc": mc,
         "m_ref": mc,
         "delta_m": 0.1,
@@ -265,9 +299,13 @@ def build_inversion_config(
     }
 
 
-def load_or_run_inversion(config: dict, output_dir: str) -> tuple[ETASParameterCalculation, str]:
+def load_or_run_inversion(
+    config: dict,
+    output_dir: str,
+    force_reinvert: bool = False,
+) -> tuple[ETASParameterCalculation, str]:
     parameter_path = os.path.join(output_dir, f"parameters_{config['id']}.json")
-    if os.path.exists(parameter_path):
+    if os.path.exists(parameter_path) and not force_reinvert:
         logger.info("Loading existing inversion from %s", parameter_path)
         with open(parameter_path, "r") as f:
             inversion_output = json.load(f)
@@ -276,6 +314,8 @@ def load_or_run_inversion(config: dict, output_dir: str) -> tuple[ETASParameterC
         calculation = ETASParameterCalculation.load_calculation(inversion_output)
         return calculation, parameter_path
 
+    if os.path.exists(parameter_path) and force_reinvert:
+        logger.info("Forcing reinversion for %s despite cached parameters.", config["id"])
     logger.info("Running NZ-wide inversion for %s", config["timewindow_end"])
     calculation = ETASParameterCalculation(config)
     calculation.prepare()
@@ -395,6 +435,7 @@ def write_metadata(
     simulation_paths: dict[int, str],
     observed_paths: dict[int, str],
     evaluation_summary_path: str,
+    initial_theta: dict,
 ) -> None:
     catalog_end = pd.Timestamp(catalog["time"].max()).strftime("%Y-%m-%d %H:%M:%S")
     metadata = {
@@ -413,6 +454,10 @@ def write_metadata(
         "lon_range": list(LON_RANGE),
         "auxiliary_start": args.auxiliary_start,
         "timewindow_start": args.timewindow_start,
+        "theta_initial": initial_theta,
+        "theta_log10_mu_delta": args.theta_log10_mu_delta,
+        "theta_log10_k0_delta": args.theta_log10_k0_delta,
+        "force_reinvert": args.force_reinvert,
         "catalog_last_time": catalog_end,
         "parameter_file": parameter_path,
         "simulation_files": {str(k): v for k, v in simulation_paths.items()},
@@ -523,14 +568,23 @@ def main() -> None:
 
     logger.info("Training events before forecast origin: %s", len(training_catalog))
 
+    initial_theta = build_initial_theta(
+        log10_mu_delta=args.theta_log10_mu_delta,
+        log10_k0_delta=args.theta_log10_k0_delta,
+    )
     config = build_inversion_config(
         output_paths["run_label"],
         forecast_start,
         args.auxiliary_start,
         args.timewindow_start,
         args.mc,
+        initial_theta,
     )
-    calculation, parameter_path = load_or_run_inversion(config, output_paths["output_dir"])
+    calculation, parameter_path = load_or_run_inversion(
+        config,
+        output_paths["output_dir"],
+        force_reinvert=args.force_reinvert,
+    )
 
     simulation_paths = run_simulations(
         calculation,
@@ -568,6 +622,7 @@ def main() -> None:
         simulation_paths,
         observed_paths,
         output_paths["evaluation_summary_path"],
+        initial_theta,
     )
     pycsep_payload = maybe_run_pycsep_analysis(args, output_paths["metadata_path"])
 
