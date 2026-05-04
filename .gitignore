@@ -1,5 +1,7 @@
 # Custom
 output_data/
+input_data/hftlongtermmodel005.txt
+.mplconfig/fontlist-v330.json
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

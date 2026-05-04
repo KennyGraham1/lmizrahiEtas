@@ -192,14 +192,14 @@ if __name__ == "__main__":
     
     catalog = download_geonet_catalog_chunked(
         starttime="1950-01-01",
-        endtime="2020-01-01",
+        endtime="2026-05-01",
         minmagnitude=4.0,  # Using M4.0+ as in user's config (mc=4.1)
         output_file="../input_data/nzcat.csv",
         chunk_years=10  # Download in 10-year chunks
     )
     
-    # Create NZ polygon
-    create_nz_polygon(output_file="../input_data/nz_polygon.npy")
+    # Create NZ polygon (Commented out to use user's custom polygon)
+    # create_nz_polygon(output_file="../input_data/nz_polygon.npy")
     
     print("\n--- Catalog Summary ---")
     print(f"Events: {len(catalog)}")

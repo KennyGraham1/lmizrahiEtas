@@ -30,6 +30,8 @@ import matplotlib
 matplotlib.use("Agg")
 
 import pandas as pd
+import numpy as np
+from scipy.spatial import cKDTree
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -48,9 +50,9 @@ from visualize_results import plot_csep_6panel
 warnings.filterwarnings("ignore")
 
 DEFAULT_EXPERIMENT_NAME = "nz_wide"
-DEFAULT_FORECAST_DURATIONS = [30, 90, 365]
-DEFAULT_FORECAST_START = "2018-01-01 00:00:00"
-DEFAULT_N_SIMULATIONS = 250
+DEFAULT_FORECAST_DURATIONS = [365, 730, 1095, 1461, 1826]
+DEFAULT_FORECAST_START = "2021-01-01 00:00:00"
+DEFAULT_N_SIMULATIONS = 2000
 DEFAULT_TIMEWINDOW_START = "1960-01-01 00:00:00"
 DEFAULT_AUXILIARY_START = "1950-01-01 00:00:00"
 DEFAULT_MC = 4.1
@@ -73,6 +75,7 @@ NZ_INITIAL_THETA = {
 
 CATALOG_PATH = os.path.join(INPUT_DATA_DIR, "nzcat.csv")
 POLYGON_PATH = os.path.join(INPUT_DATA_DIR, "nz_polygon.npy")
+BACKGROUND_RATE_COLUMN = "hft_background_rate"
 
 set_up_logger(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -96,7 +99,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--durations",
         default=",".join(str(d) for d in DEFAULT_FORECAST_DURATIONS),
-        help="Comma-separated forecast durations in days. Default: 30,90,365",
+        help=(
+            "Comma-separated forecast durations in days. Default: "
+            + ",".join(str(d) for d in DEFAULT_FORECAST_DURATIONS)
+        ),
     )
     parser.add_argument(
         "--n-simulations",
@@ -191,6 +197,24 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Maximum magnitude bin edge for pyCSEP analysis. Default: inferred.",
     )
+    parser.add_argument(
+        "--background-rate-file",
+        default=None,
+        help=(
+            "Optional long-term background-rate grid with columns "
+            "'longitude latitude magnitude rate'. If provided, rates are mapped "
+            "to catalog events and used as bg_term during inversion."
+        ),
+    )
+    parser.add_argument(
+        "--background-rate-mag",
+        type=float,
+        default=5.0,
+        help=(
+            "Magnitude slice to use from --background-rate-file. "
+            "Default: 5.0"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -221,8 +245,26 @@ def slugify(value: str) -> str:
     return slug or "nz_wide"
 
 
-def ensure_inputs_exist() -> None:
+def resolve_path(path: str | None) -> str | None:
+    if not path:
+        return None
+    if os.path.isabs(path):
+        return path
+    candidates = [
+        os.path.abspath(path),
+        os.path.join(ROOT_DIR, path),
+        os.path.join(BASE_DIR, path),
+    ]
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    return os.path.abspath(path)
+
+
+def ensure_inputs_exist(background_rate_file: str | None = None) -> None:
     missing = [path for path in (CATALOG_PATH, POLYGON_PATH) if not os.path.exists(path)]
+    if background_rate_file and not os.path.exists(background_rate_file):
+        missing.append(background_rate_file)
     if missing:
         raise FileNotFoundError(
             "Required NZ-wide input files are missing: " + ", ".join(missing)
@@ -241,13 +283,109 @@ def as_store_dir(path: str) -> str:
 def load_catalog() -> pd.DataFrame:
     catalog = pd.read_csv(CATALOG_PATH, index_col=0, parse_dates=["time"])
     catalog.sort_values(by="time", inplace=True)
-    mask = (
-        (catalog["latitude"] >= LAT_RANGE[0])
-        & (catalog["latitude"] <= LAT_RANGE[1])
-        & (catalog["longitude"] >= LON_RANGE[0])
-        & (catalog["longitude"] <= LON_RANGE[1])
-    )
+    
+    # Filter by the polygon instead of a bounding box
+    if os.path.exists(POLYGON_PATH):
+        coords = np.load(POLYGON_PATH)
+        # coords is likely [lat, lon] based on how it's created and used in pyCSEP
+        from matplotlib.path import Path
+        poly_path = Path(np.column_stack([coords[:, 1], coords[:, 0]])) # [lon, lat]
+        points = np.column_stack([catalog["longitude"], catalog["latitude"]])
+        mask = poly_path.contains_points(points)
+    else:
+        mask = (
+            (catalog["latitude"] >= LAT_RANGE[0])
+            & (catalog["latitude"] <= LAT_RANGE[1])
+            & (catalog["longitude"] >= LON_RANGE[0])
+            & (catalog["longitude"] <= LON_RANGE[1])
+        )
     return catalog.loc[mask].copy()
+
+
+def load_background_rate_grid(path: str, magnitude: float) -> tuple[pd.DataFrame, dict]:
+    raw = pd.read_csv(
+        path,
+        sep=r"\s+",
+        header=None,
+        names=["longitude", "latitude", "magnitude", "rate"],
+        dtype=float,
+    )
+    available_magnitudes = np.sort(raw["magnitude"].unique())
+    selected_magnitude = float(
+        available_magnitudes[np.argmin(np.abs(available_magnitudes - magnitude))]
+    )
+    grid = raw[np.isclose(raw["magnitude"], selected_magnitude)].copy()
+    grid = (
+        grid.groupby(["longitude", "latitude"], as_index=False)["rate"]
+        .sum()
+        .sort_values(["longitude", "latitude"])
+        .reset_index(drop=True)
+    )
+    grid["rate"] = grid["rate"].clip(lower=0)
+    if float(grid["rate"].sum()) <= 0:
+        raise ValueError(
+            f"Background grid {path} has no positive rates at magnitude "
+            f"{selected_magnitude}."
+        )
+    metadata = {
+        "background_rate_file": path,
+        "requested_background_rate_mag": magnitude,
+        "selected_background_rate_mag": selected_magnitude,
+        "background_rate_grid_points": int(len(grid)),
+        "background_rate_sum": float(grid["rate"].sum()),
+        "background_rate_max": float(grid["rate"].max()),
+    }
+    return grid, metadata
+
+
+def attach_background_rates_to_catalog(
+    catalog: pd.DataFrame,
+    background_grid: pd.DataFrame,
+) -> tuple[pd.DataFrame, dict]:
+    tree = cKDTree(background_grid[["longitude", "latitude"]].to_numpy())
+    distances, indexes = tree.query(catalog[["longitude", "latitude"]].to_numpy(), k=1)
+
+    augmented = catalog.copy()
+    augmented[BACKGROUND_RATE_COLUMN] = background_grid["rate"].to_numpy()[indexes]
+    metadata = {
+        "background_rate_column": BACKGROUND_RATE_COLUMN,
+        "catalog_background_rate_min": float(augmented[BACKGROUND_RATE_COLUMN].min()),
+        "catalog_background_rate_max": float(augmented[BACKGROUND_RATE_COLUMN].max()),
+        "catalog_background_rate_sum": float(augmented[BACKGROUND_RATE_COLUMN].sum()),
+        "catalog_background_nearest_distance_max_deg": float(np.max(distances)),
+        "catalog_background_nearest_distance_mean_deg": float(np.mean(distances)),
+    }
+    if metadata["catalog_background_rate_sum"] <= 0:
+        raise ValueError("All catalog events mapped to zero background-grid rate.")
+    return augmented, metadata
+
+
+def prepare_background_rate_catalog(
+    catalog: pd.DataFrame,
+    output_dir: str,
+    run_label: str,
+    background_rate_file: str | None,
+    background_rate_mag: float,
+) -> tuple[str, pd.DataFrame | None, dict]:
+    if background_rate_file is None:
+        return CATALOG_PATH, None, {}
+
+    background_grid, grid_metadata = load_background_rate_grid(
+        background_rate_file,
+        background_rate_mag,
+    )
+    augmented_catalog, catalog_metadata = attach_background_rates_to_catalog(
+        catalog,
+        background_grid,
+    )
+    catalog_path = os.path.join(output_dir, f"catalog_{run_label}_with_background.csv")
+    augmented_catalog.to_csv(catalog_path)
+    metadata = {
+        **grid_metadata,
+        **catalog_metadata,
+        "background_augmented_catalog": catalog_path,
+    }
+    return catalog_path, background_grid, metadata
 
 
 def build_initial_theta(
@@ -277,18 +415,24 @@ def build_run_paths(experiment_name: str, forecast_start: dt.datetime) -> dict[s
 
 def build_inversion_config(
     run_label: str,
+    catalog_path: str,
     forecast_start: dt.datetime,
     auxiliary_start: str,
     timewindow_start: str,
     mc: float,
     initial_theta: dict,
+    bg_term: str | None = None,
 ) -> dict:
-    return {
-        "fn_catalog": CATALOG_PATH,
+    theta = initial_theta.copy()
+    if bg_term is not None and theta.get("log10_iota") is None:
+        theta["log10_iota"] = theta["log10_mu"]
+
+    config = {
+        "fn_catalog": catalog_path,
         "auxiliary_start": auxiliary_start,
         "timewindow_start": timewindow_start,
         "timewindow_end": forecast_start.strftime("%Y-%m-%d %H:%M:%S"),
-        "theta_0": initial_theta.copy(),
+        "theta_0": theta,
         "mc": mc,
         "m_ref": mc,
         "delta_m": 0.1,
@@ -297,6 +441,9 @@ def build_inversion_config(
         "name": "nz_wide_standard",
         "id": run_label,
     }
+    if bg_term is not None:
+        config["bg_term"] = bg_term
+    return config
 
 
 def load_or_run_inversion(
@@ -306,13 +453,22 @@ def load_or_run_inversion(
 ) -> tuple[ETASParameterCalculation, str]:
     parameter_path = os.path.join(output_dir, f"parameters_{config['id']}.json")
     if os.path.exists(parameter_path) and not force_reinvert:
-        logger.info("Loading existing inversion from %s", parameter_path)
         with open(parameter_path, "r") as f:
             inversion_output = json.load(f)
-        inversion_output["fn_catalog"] = config["fn_catalog"]
-        inversion_output["shape_coords"] = config["shape_coords"]
-        calculation = ETASParameterCalculation.load_calculation(inversion_output)
-        return calculation, parameter_path
+        cached_bg_term = inversion_output.get("bg_term")
+        requested_bg_term = config.get("bg_term")
+        if cached_bg_term == requested_bg_term:
+            logger.info("Loading existing inversion from %s", parameter_path)
+            inversion_output["fn_catalog"] = config["fn_catalog"]
+            inversion_output["shape_coords"] = config["shape_coords"]
+            calculation = ETASParameterCalculation.load_calculation(inversion_output)
+            return calculation, parameter_path
+        logger.info(
+            "Cached inversion bg_term=%r does not match requested bg_term=%r; "
+            "rerunning inversion.",
+            cached_bg_term,
+            requested_bg_term,
+        )
 
     if os.path.exists(parameter_path) and force_reinvert:
         logger.info("Forcing reinversion for %s despite cached parameters.", config["id"])
@@ -332,12 +488,22 @@ def run_simulations(
     mc: float,
     m_max: float | None,
     simulation_dir: str,
+    background_grid: pd.DataFrame | None = None,
 ) -> dict[int, str]:
-    simulation = ETASSimulation(calculation, m_max=m_max, approx_times=True)
-    simulation.prepare()
-
     simulation_paths = {}
     for duration in durations:
+        induced_info = build_background_induced_info(
+            calculation,
+            background_grid,
+            duration,
+        )
+        simulation = ETASSimulation(
+            calculation,
+            m_max=m_max,
+            approx_times=True,
+            induced_info=induced_info,
+        )
+        simulation.prepare()
         simulation_path = os.path.join(simulation_dir, f"forecasts_{duration}days.csv")
         logger.info(
             "Simulating %s NZ-wide catalogs for %s days into %s",
@@ -353,6 +519,46 @@ def run_simulations(
         )
         simulation_paths[duration] = simulation_path
     return simulation_paths
+
+
+def _minimum_positive_spacing(values: pd.Series) -> float:
+    unique_values = np.sort(values.drop_duplicates().to_numpy())
+    diffs = np.diff(unique_values)
+    diffs = diffs[diffs > 0]
+    if len(diffs) == 0:
+        return 0.0
+    return float(diffs.min())
+
+
+def build_background_induced_info(
+    calculation: ETASParameterCalculation,
+    background_grid: pd.DataFrame | None,
+    duration_days: int,
+) -> list | None:
+    if background_grid is None:
+        return None
+
+    log10_iota = calculation.theta.get("log10_iota")
+    if log10_iota is None or not np.isfinite(float(log10_iota)):
+        return None
+
+    rates = background_grid["rate"].clip(lower=0)
+    max_rate = float(rates.max())
+    if max_rate <= 0:
+        return None
+
+    expected_count = float(np.power(10, float(log10_iota)) * calculation.area * duration_days)
+    if expected_count <= 0:
+        return None
+
+    return [
+        background_grid["latitude"].reset_index(drop=True),
+        background_grid["longitude"].reset_index(drop=True),
+        (rates / max_rate).reset_index(drop=True),
+        _minimum_positive_spacing(background_grid["latitude"]),
+        _minimum_positive_spacing(background_grid["longitude"]),
+        expected_count,
+    ]
 
 
 def build_observed_windows(
@@ -436,6 +642,7 @@ def write_metadata(
     observed_paths: dict[int, str],
     evaluation_summary_path: str,
     initial_theta: dict,
+    background_metadata: dict,
 ) -> None:
     catalog_end = pd.Timestamp(catalog["time"].max()).strftime("%Y-%m-%d %H:%M:%S")
     metadata = {
@@ -464,6 +671,7 @@ def write_metadata(
         "observed_files": {str(k): v for k, v in observed_paths.items()},
         "evaluation_summary_file": evaluation_summary_path,
         "skip_plots": args.skip_plots,
+        **background_metadata,
     }
     with open(metadata_path, "w") as f:
         json.dump(metadata, f, indent=2)
@@ -537,7 +745,8 @@ def maybe_run_pycsep_analysis(
 
 def main() -> None:
     args = parse_args()
-    ensure_inputs_exist()
+    args.background_rate_file = resolve_path(args.background_rate_file)
+    ensure_inputs_exist(args.background_rate_file)
 
     forecast_start = parse_datetime(args.forecast_start)
     durations = parse_durations(args.durations)
@@ -547,6 +756,12 @@ def main() -> None:
     logger.info("Forecast origin: %s", forecast_start)
     logger.info("Durations: %s days", durations)
     logger.info("Simulations per duration: %s", args.n_simulations)
+    if args.background_rate_file:
+        logger.info(
+            "Using background-rate grid %s at M%.1f",
+            args.background_rate_file,
+            args.background_rate_mag,
+        )
 
     catalog = load_catalog()
     if forecast_start <= pd.Timestamp(args.timewindow_start).to_pydatetime():
@@ -572,13 +787,26 @@ def main() -> None:
         log10_mu_delta=args.theta_log10_mu_delta,
         log10_k0_delta=args.theta_log10_k0_delta,
     )
+    catalog_path, background_grid, background_metadata = prepare_background_rate_catalog(
+        catalog,
+        output_paths["output_dir"],
+        output_paths["run_label"],
+        args.background_rate_file,
+        args.background_rate_mag,
+    )
     config = build_inversion_config(
         output_paths["run_label"],
+        catalog_path,
         forecast_start,
         args.auxiliary_start,
         args.timewindow_start,
         args.mc,
         initial_theta,
+        bg_term=(
+            BACKGROUND_RATE_COLUMN
+            if args.background_rate_file is not None
+            else None
+        ),
     )
     calculation, parameter_path = load_or_run_inversion(
         config,
@@ -593,6 +821,7 @@ def main() -> None:
         args.mc,
         args.m_max,
         output_paths["simulation_dir"],
+        background_grid=background_grid,
     )
     observed_windows, observed_paths = build_observed_windows(
         catalog,
@@ -623,6 +852,7 @@ def main() -> None:
         observed_paths,
         output_paths["evaluation_summary_path"],
         initial_theta,
+        background_metadata,
     )
     pycsep_payload = maybe_run_pycsep_analysis(args, output_paths["metadata_path"])
 

@@ -38,10 +38,16 @@ import numpy as np
 import pandas as pd
 
 FORECAST_SCRIPT = os.path.join(BASE_DIR, "run_nz_wide_forecast.py")
-DEFAULT_FORECAST_START = "2018-01-01 00:00:00"
-DEFAULT_DURATIONS = "30,90,365"
+DEFAULT_FORECAST_START = "2021-01-01 00:00:00"
+DEFAULT_DURATIONS = "365,730,1095,1461,1826"
 DEFAULT_BATCH_NAME = "nz_wide_calibration"
-DEFAULT_N_SIMULATIONS = 250
+DEFAULT_N_SIMULATIONS = 2000
+DEFAULT_BACKGROUND_RATE_FILE = os.path.join(
+    ROOT_DIR,
+    "input_data",
+    "hftlongtermmodel005.txt",
+)
+DEFAULT_BACKGROUND_RATE_MAG = 5.0
 
 
 @dataclass(frozen=True)
@@ -199,6 +205,24 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Maximum magnitude bin edge forwarded to the pyCSEP analysis step.",
     )
+    parser.add_argument(
+        "--background-rate-file",
+        default=DEFAULT_BACKGROUND_RATE_FILE,
+        help=(
+            "Long-term background-rate grid forwarded to the forecast runner. "
+            "Use an empty string to disable. "
+            f"Default: {DEFAULT_BACKGROUND_RATE_FILE}"
+        ),
+    )
+    parser.add_argument(
+        "--background-rate-mag",
+        type=float,
+        default=DEFAULT_BACKGROUND_RATE_MAG,
+        help=(
+            "Magnitude slice from --background-rate-file used as the spatial "
+            f"background covariate. Default: {DEFAULT_BACKGROUND_RATE_MAG}"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -215,6 +239,12 @@ def slugify(value: str) -> str:
 
 def parse_datetime(value: str) -> dt.datetime:
     return pd.Timestamp(value).to_pydatetime()
+
+
+def normalize_optional_path(path: str | None) -> str | None:
+    if not path:
+        return None
+    return os.path.abspath(path)
 
 
 def ensure_dir(path: str) -> str:
@@ -308,6 +338,13 @@ def metadata_matches_request(
         return False
     if float(metadata.get("theta_log10_k0_delta", np.nan)) != float(scenario.theta_log10_k0_delta):
         return False
+    requested_background = normalize_optional_path(args.background_rate_file)
+    stored_background = normalize_optional_path(metadata.get("background_rate_file"))
+    if requested_background != stored_background:
+        return False
+    if requested_background is not None:
+        if float(metadata.get("requested_background_rate_mag", np.nan)) != float(args.background_rate_mag):
+            return False
 
     pycsep = metadata.get("pycsep_analysis", {})
     if pycsep.get("status") != "completed":
@@ -377,6 +414,15 @@ def run_scenario(
         command.extend(["--m-max", str(scenario.m_max)])
     if args.pycsep_max_mag is not None:
         command.extend(["--pycsep-max-mag", str(args.pycsep_max_mag)])
+    if args.background_rate_file:
+        command.extend(
+            [
+                "--background-rate-file",
+                args.background_rate_file,
+                "--background-rate-mag",
+                str(args.background_rate_mag),
+            ]
+        )
     if args.skip_plots:
         command.append("--skip-plots")
     if needs_forced_reinvert:
@@ -593,6 +639,8 @@ def write_markdown_report(
         f"| **Training window** | {str(tw_start)[:10]} → {args.forecast_start[:10]} |",
         f"| **Auxiliary start** | {str(aux_start)[:10]} |",
         f"| **Region** | 34°S–48°S, 164°E–180°E (rectangular) |",
+        f"| **Background rate grid** | {args.background_rate_file or 'disabled'} |",
+        f"| **Background rate magnitude slice** | {args.background_rate_mag if args.background_rate_file else 'n/a'} |",
         f"| **Forecast origin** | `{args.forecast_start}` |",
         f"| **Forecast horizons** | {args.durations} days |",
         f"| **Simulations / scenario** | {args.n_simulations} |",
@@ -1102,6 +1150,7 @@ def plot_scorecard(
 
 def main() -> None:
     args = parse_args()
+    args.background_rate_file = normalize_optional_path(args.background_rate_file)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(message)s")
     logger = logging.getLogger(__name__)
     forecast_start = parse_datetime(args.forecast_start)
@@ -1118,6 +1167,8 @@ def main() -> None:
         "forecast_start": args.forecast_start,
         "durations": args.durations,
         "n_simulations": args.n_simulations,
+        "background_rate_file": args.background_rate_file,
+        "background_rate_mag": args.background_rate_mag,
         "scenarios": [],
         "failures": [],
     }

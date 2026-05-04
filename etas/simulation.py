@@ -638,7 +638,8 @@ def generate_aftershocks(
     theta_without_mu = theta[2:]
 
     # random timedeltas for all aftershocks
-    total_n_aftershocks = sources["n_aftershocks"].sum()
+    repeat_counts = sources["n_aftershocks"].to_numpy(dtype=np.int64)
+    total_n_aftershocks = int(repeat_counts.sum())
 
     if parameters["log10_tau"] == np.inf:
         all_deltas = simulate_aftershock_time_untapered(
@@ -661,10 +662,12 @@ def generate_aftershocks(
             size=total_n_aftershocks,
         )
 
-    aftershocks = sources.loc[sources.index.repeat(sources.n_aftershocks)]
+    repeated_positions = np.repeat(np.arange(len(sources)), repeat_counts)
+    parent_ids = np.repeat(sources.index.to_numpy(), repeat_counts)
+    aftershocks = sources.iloc[repeated_positions].copy().reset_index(drop=True)
 
     keep_columns = ["time", "latitude", "longitude", "magnitude"]
-    aftershocks["parent"] = aftershocks.index
+    aftershocks["parent"] = parent_ids
 
     for col in keep_columns:
         aftershocks["parent_" + col] = aftershocks[col]

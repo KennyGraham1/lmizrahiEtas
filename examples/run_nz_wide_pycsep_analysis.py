@@ -45,6 +45,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+
 try:
     import csep.plots as csep_plots
     from csep.core import catalog_evaluations, catalogs, forecasts, regions
@@ -530,6 +533,7 @@ def plot_spatial_diagnostic(
             cmap="YlOrRd",
             linewidths=0,
             alpha=0.9,
+            transform=ccrs.PlateCarree(),
         )
         plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.04, label="Mean expected count")
 
@@ -545,16 +549,22 @@ def plot_spatial_diagnostic(
             linewidths=0.5,
             alpha=0.85,
             label="Observed",
+            transform=ccrs.PlateCarree(),
         )
 
     if os.path.exists(polygon_path):
         coords = np.load(polygon_path)
-        ax.plot(coords[:, 1], coords[:, 0], color="black", linewidth=1.4, alpha=0.8)
+        ax.plot(coords[:, 1], coords[:, 0], color="black", linewidth=1.4, alpha=0.8, transform=ccrs.PlateCarree())
+
+    ax.add_feature(cfeature.LAND, facecolor='#F4F6F8')
+    ax.add_feature(cfeature.OCEAN, facecolor='#E3EDF3')
+    ax.coastlines(resolution='10m', linewidth=0.5)
+    
+    gl = ax.gridlines(draw_labels=True, alpha=0.2, color='gray')
+    gl.top_labels = False
+    gl.right_labels = False
 
     ax.set_title("Expected Spatial Rate and Observations")
-    ax.set_xlabel("Longitude")
-    ax.set_ylabel("Latitude")
-    ax.grid(True, alpha=0.2)
     if len(observed) > 0:
         ax.legend(loc="lower left", frameon=True)
 
@@ -590,17 +600,23 @@ def plot_spatial_residual_diagnostic(
             vmax=vmax,
             linewidths=0,
             alpha=0.95,
+            transform=ccrs.PlateCarree(),
         )
         plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.04, label="Observed - expected")
 
     if os.path.exists(polygon_path):
         coords = np.load(polygon_path)
-        ax.plot(coords[:, 1], coords[:, 0], color="black", linewidth=1.4, alpha=0.8)
+        ax.plot(coords[:, 1], coords[:, 0], color="black", linewidth=1.4, alpha=0.8, transform=ccrs.PlateCarree())
+
+    ax.add_feature(cfeature.LAND, facecolor='#F4F6F8')
+    ax.add_feature(cfeature.OCEAN, facecolor='#E3EDF3')
+    ax.coastlines(resolution='10m', linewidth=0.5)
+    
+    gl = ax.gridlines(draw_labels=True, alpha=0.2, color='gray')
+    gl.top_labels = False
+    gl.right_labels = False
 
     ax.set_title("Spatial Residuals (Observed - Expected)")
-    ax.set_xlabel("Longitude")
-    ax.set_ylabel("Latitude")
-    ax.grid(True, alpha=0.2)
 
 
 def plot_count_bias_decomposition_panel(
@@ -797,8 +813,18 @@ def plot_horizon_dashboard(
         horizon_eval.filtered_observed,
         float(metadata["mc"]),
     )
-    plot_spatial_diagnostic(axes_flat[6], horizon_eval, metadata["polygon_path"])
-    plot_spatial_residual_diagnostic(axes_flat[7], horizon_eval, metadata["polygon_path"])
+    
+    # Replace standard axes with Cartopy GeoAxes for spatial plots
+    gs6 = axes_flat[6].get_subplotspec()
+    axes_flat[6].remove()
+    ax6 = fig.add_subplot(gs6, projection=ccrs.Mercator())
+    plot_spatial_diagnostic(ax6, horizon_eval, metadata["polygon_path"])
+    
+    gs7 = axes_flat[7].get_subplotspec()
+    axes_flat[7].remove()
+    ax7 = fig.add_subplot(gs7, projection=ccrs.Mercator())
+    plot_spatial_residual_diagnostic(ax7, horizon_eval, metadata["polygon_path"])
+    
     plot_count_bias_decomposition_panel(axes_flat[8], horizon_eval.diagnostics)
     plot_text_summary(axes_flat[9], horizon_eval)
 
