@@ -253,6 +253,73 @@ def branching_ratio(theta, beta, dm_max=None):
     return eta
 
 
+def assess_inversion_degeneracy(theta, beta, n_hat=None, dm_max=None,
+                                min_branching_ratio=0.02):
+    """
+    Diagnose whether an inverted ETAS parameter set has collapsed to a
+    degenerate, triggering-free solution.
+
+    This happens, for example, when a spatial background covariate (``bg_term``)
+    over-explains the catalog: the EM assigns nearly all events to the
+    background, productivity (k0) is driven to its lower bound, and the
+    resulting "forecast" behaves like a stationary background model with no
+    aftershock triggering.
+
+    Parameters
+    ----------
+    theta : array-like or dict
+        Inverted parameters (order as in ``parameter_dict2array``).
+    beta : float
+        Gutenberg-Richter beta used in the inversion.
+    n_hat : float, optional
+        Expected number of homogeneous-background events from the last
+        expectation step. Only used for the human-readable reasons.
+    dm_max : float, optional
+        Passed through to :func:`branching_ratio`.
+    min_branching_ratio : float
+        Branching ratios below this are treated as "no triggering".
+
+    Returns
+    -------
+    (bool, dict)
+        ``(is_degenerate, info)`` where ``info`` holds the estimated branching
+        ratio and a list of human-readable reasons. An empty reason list means
+        the fit looks healthy.
+    """
+    theta_arr = (
+        parameter_dict2array(theta) if isinstance(theta, dict)
+        else np.asarray(theta, dtype=float)
+    )
+
+    reasons = []
+
+    finite_values = [float(v) for v in theta_arr if v is not None]
+    if not all(np.isfinite(v) for v in finite_values):
+        reasons.append("non-finite parameter(s) in the fitted model")
+
+    try:
+        eta = float(branching_ratio(theta_arr, beta, dm_max))
+    except BaseException:
+        eta = np.nan
+
+    if not np.isfinite(eta):
+        reasons.append("branching ratio could not be evaluated")
+    elif eta < min_branching_ratio:
+        reasons.append(
+            "branching ratio {:.4g} below {:.4g} "
+            "(essentially no triggering)".format(eta, min_branching_ratio)
+        )
+
+    if n_hat is not None and np.isfinite(n_hat) and n_hat <= 0:
+        reasons.append("n_hat is zero (no homogeneous-background events)")
+
+    info = {
+        "branching_ratio": eta if np.isfinite(eta) else None,
+        "reasons": reasons,
+    }
+    return (len(reasons) > 0), info
+
+
 def to_days(timediff):
     return timediff / dt.timedelta(days=1)
 
@@ -996,6 +1063,8 @@ class ETASParameterCalculation:
         self.pij = None
         self.n_hat = None
         self.i_hat = None
+        self.degenerate = None
+        self.degeneracy_info = None
         self.i = metadata.get("n_iterations")
 
     @classmethod
@@ -1336,6 +1405,23 @@ class ETASParameterCalculation:
         ) = self.expectation_step(theta_old, self.m_ref - self.delta_m / 2)
         self.logger.info("    n_hat: {}".format(self.n_hat))
 
+        self.degenerate, self.degeneracy_info = assess_inversion_degeneracy(
+            self.theta, self.beta, n_hat=self.n_hat
+        )
+        self.logger.info(
+            "    branching ratio: {}".format(
+                self.degeneracy_info["branching_ratio"])
+        )
+        if self.degenerate:
+            self.logger.warning(
+                "INVERSION LOOKS DEGENERATE (%s). The fitted model has little "
+                "or no ETAS triggering, so simulated forecasts will behave like "
+                "a stationary background model. Common cause: a spatial "
+                "background covariate (bg_term) that over-explains the catalog. "
+                "Inspect the background term before using these parameters.",
+                "; ".join(self.degeneracy_info["reasons"]),
+            )
+
         self.inversion_done = True
 
         return self.theta
@@ -1620,20 +1706,24 @@ class ETASParameterCalculation:
             "n_target_events": len(self.target_events),
             "area": self.area,
             "log10_mu_range": RANGES[0],
-            "log10_k0_range": RANGES[1],
-            "a_range": RANGES[2],
-            "log10_c_range": RANGES[3],
-            "omega_range": RANGES[4],
-            "log10_tau_range": RANGES[5],
-            "log10_d_range": RANGES[6],
-            "gamma_range": RANGES[7],
-            "rho_range": RANGES[8],
+            "log10_iota_range": RANGES[1],
+            "log10_k0_range": RANGES[2],
+            "a_range": RANGES[3],
+            "log10_c_range": RANGES[4],
+            "omega_range": RANGES[5],
+            "log10_tau_range": RANGES[6],
+            "log10_d_range": RANGES[7],
+            "gamma_range": RANGES[8],
+            "rho_range": RANGES[9],
             "beta": self.beta,
             "b_positive": self.b_positive,
             "three_dim": self.three_dim,
             "space_unit_in_meters": self.space_unit_in_meters,
             "n_hat": self.n_hat,
             "i_hat": self.i_hat,
+            "branching_ratio": (self.degeneracy_info or {}).get(
+                "branching_ratio"),
+            "inversion_degenerate": self.degenerate,
             "calculation_date": str(self.calculation_date),
             "initial_values": self.theta_0,
             "final_parameters": self.theta,

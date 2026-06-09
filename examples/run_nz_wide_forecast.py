@@ -42,7 +42,10 @@ sys.path.append(ROOT_DIR)
 sys.path.append(os.path.join(ROOT_DIR, "SeismoStats"))
 
 from etas import set_up_logger
-from etas.inversion import ETASParameterCalculation
+from etas.inversion import (
+    ETASParameterCalculation,
+    assess_inversion_degeneracy,
+)
 from etas.simulation import ETASSimulation
 from visualize_results import plot_csep_6panel
 
@@ -164,6 +167,24 @@ def parse_args() -> argparse.Namespace:
         "--force-reinvert",
         action="store_true",
         help="Ignore any cached parameter file for this run label and rerun the inversion.",
+    )
+    parser.add_argument(
+        "--force-resimulate",
+        action="store_true",
+        help=(
+            "Delete and regenerate forecast simulation files even if they exist. "
+            "Re-inversion (--force-reinvert) implies this, since stale forecasts "
+            "would otherwise be reused with the old parameters."
+        ),
+    )
+    parser.add_argument(
+        "--allow-degenerate-inversion",
+        action="store_true",
+        help=(
+            "Proceed to simulation even if the ETAS inversion collapsed to a "
+            "triggering-free (background-only) solution. By default such a run "
+            "aborts, because the resulting forecast is not a real ETAS forecast."
+        ),
     )
     parser.add_argument(
         "--skip-pycsep-analysis",
@@ -481,6 +502,48 @@ def load_or_run_inversion(
     return calculation, parameter_path
 
 
+def guard_against_degenerate_inversion(
+    calculation: ETASParameterCalculation,
+    allow_degenerate: bool,
+) -> dict:
+    """
+    Refuse to simulate on an inversion that collapsed to a triggering-free
+    (background-only) solution, unless explicitly allowed.
+
+    Such a fit produces a stationary inhomogeneous-Poisson "forecast" with no
+    aftershock triggering, which fails spatial/likelihood CSEP tests by
+    construction. Catching it here avoids spending hours simulating a dead model.
+    """
+    degenerate, info = assess_inversion_degeneracy(
+        calculation.theta,
+        calculation.beta,
+        n_hat=getattr(calculation, "n_hat", None),
+    )
+    branching = info["branching_ratio"]
+    logger.info(
+        "Inversion branching ratio: %s",
+        f"{branching:.4g}" if branching is not None else "undefined",
+    )
+    if degenerate:
+        reasons = "; ".join(info["reasons"])
+        message = (
+            "ETAS inversion is degenerate (%s). The fitted model has essentially "
+            "no triggering and would produce a stationary background-only "
+            "forecast. This typically means the spatial background term "
+            "(bg_term) over-explains the catalog. Aborting before simulation."
+        )
+        if allow_degenerate:
+            logger.warning(message + " Continuing anyway (--allow-degenerate-inversion).", reasons)
+        else:
+            raise RuntimeError(
+                (message % reasons)
+                + " Re-run without --background-rate-file to use a homogeneous "
+                "background, supply a declustered/independent background grid, "
+                "or pass --allow-degenerate-inversion to override."
+            )
+    return info
+
+
 def run_simulations(
     calculation: ETASParameterCalculation,
     durations: list[int],
@@ -489,6 +552,7 @@ def run_simulations(
     m_max: float | None,
     simulation_dir: str,
     background_grid: pd.DataFrame | None = None,
+    overwrite: bool = False,
 ) -> dict[int, str]:
     simulation_paths = {}
     for duration in durations:
@@ -505,6 +569,12 @@ def run_simulations(
         )
         simulation.prepare()
         simulation_path = os.path.join(simulation_dir, f"forecasts_{duration}days.csv")
+        # simulate_to_csv() resumes/skips when the file already exists, so a
+        # stale forecast from a previous (e.g. degenerate) inversion would be
+        # silently reused. Remove it first when the caller asks to overwrite.
+        if overwrite and os.path.exists(simulation_path):
+            logger.info("Removing stale forecast file %s before re-simulating", simulation_path)
+            os.remove(simulation_path)
         logger.info(
             "Simulating %s NZ-wide catalogs for %s days into %s",
             n_simulations,
@@ -814,6 +884,8 @@ def main() -> None:
         force_reinvert=args.force_reinvert,
     )
 
+    guard_against_degenerate_inversion(calculation, args.allow_degenerate_inversion)
+
     simulation_paths = run_simulations(
         calculation,
         durations,
@@ -822,6 +894,7 @@ def main() -> None:
         args.m_max,
         output_paths["simulation_dir"],
         background_grid=background_grid,
+        overwrite=args.force_resimulate or args.force_reinvert,
     )
     observed_windows, observed_paths = build_observed_windows(
         catalog,

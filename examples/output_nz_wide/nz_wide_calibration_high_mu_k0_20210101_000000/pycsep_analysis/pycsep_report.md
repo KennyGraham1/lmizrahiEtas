@@ -8,59 +8,61 @@
 
 ## Key Findings
 
-- The ensemble overpredicts event counts on average; observed / simulated mean ratio is `0.832`.
-- Catalog N-Test is consistent in `1/5` horizons.
+- The ensemble overpredicts event counts on average; observed / simulated mean ratio is `0.876`.
+- Catalog N-Test is consistent in `2/5` horizons.
 - Catalog M-Test is consistent in `5/5` horizons.
-- Catalog S-Test is consistent in `0/5` horizons.
-- Catalog PL-Test is consistent in `4/5` horizons.
-- A large share of the forecasted rate falls in cells with no observed events; the mean empty-cell share is `0.963`.
+- Catalog S-Test is consistent in `5/5` horizons.
+- Catalog PL-Test is consistent in `5/5` horizons.
+- Spatial and pseudo-likelihood diagnostics indicate undersampled forecast cells for at least one horizon.
+- A large share of the forecasted rate falls in cells with no observed events; the mean empty-cell share is `0.870`.
+- Some observed activity lands in zero-rate cells; the mean unsupported observed-event share is `0.001`.
 
 ## Horizon Summary
 
 | Horizon (days) | Observed | Sim mean | N | M | S | PL | Zero-rate obs cells |
 | --- | ---: | ---: | --- | --- | --- | --- | ---: |
-| 365.000 | 357 | 286.658 | normal (1) | normal (1) | normal (0) | normal (0) | 0 |
-| 730.000 | 495 | 572.843 | normal (0) | normal (1) | normal (0) | normal (1) | 0 |
-| 1095.000 | 637 | 860.423 | normal (0) | normal (1) | normal (0) | normal (1) | 0 |
-| 1461.000 | 767 | 1145.950 | normal (0) | normal (1) | normal (0) | normal (1) | 0 |
-| 1826.000 | 921 | 1433.132 | normal (0) | normal (1) | normal (0) | normal (1) | 0 |
+| 365.000 | 357 | 262.634 | normal (1) | normal (1) | normal (1) | normal (1) | 0 |
+| 730.000 | 495 | 540.328 | normal (1) | normal (1) | normal (1) | normal (1) | 0 |
+| 1095.000 | 637 | 827.729 | normal (0) | normal (1) | normal (1) | normal (1) | 0 |
+| 1461.000 | 767 | 1119.633 | normal (0) | normal (1) | undersampled (1) | undersampled (1) | 2 |
+| 1826.000 | 921 | 1417.878 | normal (0) | normal (1) | undersampled (1) | undersampled (1) | 1 |
 
 ## Calibration Summary
 
-- Catalog N-Test: calibration p-value = `0.001`
-- Catalog M-Test: calibration p-value = `0.678`
-- Catalog S-Test: calibration p-value = `0.000`
-- Catalog PL-Test: calibration p-value = `0.007`
+- Catalog N-Test: calibration p-value = `0.028`
+- Catalog M-Test: calibration p-value = `0.636`
+- Catalog S-Test: calibration p-value = `0.053`
+- Catalog PL-Test: calibration p-value = `0.009`
 
 ## Additional Diagnostics
 
 | Horizon (days) | Obs/Sim mean ratio | Sim-Obs mean bias | Sim outside region (%) | Obs outside region (%) |
 | --- | ---: | ---: | ---: | ---: |
-| 365.000 | 1.245 | -70.342 | 0.000 | 0.000 |
-| 730.000 | 0.864 | 77.843 | 0.000 | 0.000 |
-| 1095.000 | 0.740 | 223.423 | 0.000 | 0.000 |
-| 1461.000 | 0.669 | 378.950 | 0.000 | 0.000 |
-| 1826.000 | 0.643 | 512.132 | 0.000 | 0.000 |
+| 365.000 | 1.359 | -94.366 | 0.000 | 0.000 |
+| 730.000 | 0.916 | 45.328 | 0.000 | 0.000 |
+| 1095.000 | 0.770 | 190.729 | 0.000 | 0.000 |
+| 1461.000 | 0.685 | 352.633 | 0.000 | 0.000 |
+| 1826.000 | 0.650 | 496.878 | 0.000 | 0.000 |
 
 ## Spatial Residual Diagnostics
 
 | Horizon (days) | Expected in observed cells | Expected in empty cells | Observed in zero-rate cells | Mean abs(obs-exp) per cell |
 | --- | ---: | ---: | ---: | ---: |
-| 365.000 | 4.920 | 281.737 | 0.000 | 0.030 |
-| 730.000 | 15.945 | 556.899 | 0.000 | 0.049 |
-| 1095.000 | 32.693 | 827.730 | 0.000 | 0.068 |
-| 1461.000 | 54.039 | 1091.911 | 0.000 | 0.086 |
-| 1826.000 | 79.841 | 1353.291 | 0.000 | 0.105 |
+| 365.000 | 16.928 | 245.706 | 0.000 | 0.028 |
+| 730.000 | 55.235 | 485.093 | 0.000 | 0.044 |
+| 1095.000 | 109.083 | 718.646 | 0.000 | 0.060 |
+| 1461.000 | 181.846 | 937.788 | 2.000 | 0.074 |
+| 1826.000 | 268.383 | 1149.494 | 1.000 | 0.088 |
 
 ## Peak Residual Cells
 
 | Horizon (days) | Largest underforecast cell (lon, lat, obs-exp) | Largest overforecast cell (lon, lat, obs-exp) |
 | --- | --- | --- |
-| 365.000 | (179.850, -37.450, 34.991) | (167.350, -44.650, -0.542) |
-| 730.000 | (179.850, -37.450, 35.980) | (167.350, -44.650, -1.061) |
-| 1095.000 | (179.850, -37.450, 35.975) | (167.350, -44.650, -1.610) |
-| 1461.000 | (179.850, -37.450, 35.967) | (167.350, -44.650, -2.135) |
-| 1826.000 | (179.850, -37.450, 35.963) | (167.350, -44.650, -2.709) |
+| 365.000 | (179.850, -37.450, 34.850) | (174.250, -41.750, -1.135) |
+| 730.000 | (179.850, -37.450, 35.684) | (174.350, -41.650, -1.803) |
+| 1095.000 | (179.850, -37.450, 35.509) | (174.350, -41.650, -2.560) |
+| 1461.000 | (179.850, -37.450, 35.418) | (174.350, -41.650, -3.370) |
+| 1826.000 | (179.850, -37.450, 35.245) | (174.350, -41.650, -4.209) |
 
 ## Notes
 

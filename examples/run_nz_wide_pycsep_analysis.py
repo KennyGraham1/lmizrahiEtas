@@ -558,7 +558,7 @@ def plot_spatial_diagnostic(
 
     ax.add_feature(cfeature.LAND, facecolor='#F4F6F8')
     ax.add_feature(cfeature.OCEAN, facecolor='#E3EDF3')
-    ax.coastlines(resolution='10m', linewidth=0.5)
+    ax.coastlines(resolution='50m', linewidth=0.5)
     
     gl = ax.gridlines(draw_labels=True, alpha=0.2, color='gray')
     gl.top_labels = False
@@ -610,7 +610,7 @@ def plot_spatial_residual_diagnostic(
 
     ax.add_feature(cfeature.LAND, facecolor='#F4F6F8')
     ax.add_feature(cfeature.OCEAN, facecolor='#E3EDF3')
-    ax.coastlines(resolution='10m', linewidth=0.5)
+    ax.coastlines(resolution='50m', linewidth=0.5)
     
     gl = ax.gridlines(draw_labels=True, alpha=0.2, color='gray')
     gl.top_labels = False
