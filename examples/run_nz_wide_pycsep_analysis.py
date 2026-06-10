@@ -45,6 +45,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+import matplotlib.patheffects as pe
+from matplotlib.colors import LogNorm, TwoSlopeNorm
+from matplotlib.ticker import LogLocator, LogFormatterMathtext
+from matplotlib.patches import FancyBboxPatch
+
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 
@@ -95,12 +100,55 @@ COLORS = {
     "observed": "#B33A3A",
     "simulated": "#2C6EAA",
     "band": "#A9C9E8",
-    "grid": "#D7E3EE",
-    "accent": "#F28E2B",
-    "good": "#2CA02C",
-    "bad": "#D62728",
-    "muted": "#6B7280",
+    "median": "#1F4E79",
+    "grid": "#E2E8F0",
+    "accent": "#E8A24A",
+    "good": "#1B7F4B",
+    "bad": "#C0392B",
+    "neutral": "#94A3B8",
+    "muted": "#475569",
+    "ink": "#1F2933",
+    "hair": "#E2E8F0",
+    "head_bg": "#1B2A3A",
+    "head_tx": "#F4F7FA",
+    "land": "#EEF1F4",
+    "ocean": "#DCE7EE",
+    "coast": "#3A4A57",
+    "neat": "#9AA7B4",
+    "cb_exp": "#2C6EAA",
+    "cb_emp": "#E8A24A",
+    "ob_sup": "#3F7F8C",
+    "ob_zero": "#C0392B",
 }
+MONO = "DejaVu Sans Mono"
+
+
+def apply_dashboard_style() -> None:
+    """Global, reproducible matplotlib style for the dashboards."""
+    plt.rcParams.update({
+        "figure.facecolor": "#FFFFFF", "savefig.facecolor": "#FFFFFF",
+        "axes.facecolor": "#FFFFFF", "axes.edgecolor": "#CBD5E1", "axes.linewidth": 0.8,
+        "font.family": "sans-serif", "font.sans-serif": ["DejaVu Sans", "Liberation Sans"],
+        "font.size": 11, "axes.titlesize": 12.5, "axes.titleweight": "semibold",
+        "axes.titlelocation": "left", "axes.titlepad": 8, "axes.titlecolor": COLORS["ink"],
+        "axes.labelsize": 10.5, "axes.labelcolor": COLORS["ink"],
+        "xtick.color": COLORS["muted"], "ytick.color": COLORS["muted"],
+        "xtick.labelsize": 9.5, "ytick.labelsize": 9.5,
+        "grid.color": COLORS["hair"], "grid.linewidth": 0.7,
+        "legend.frameon": True, "legend.framealpha": 0.92, "legend.edgecolor": "#CBD5E1",
+        "legend.fontsize": 9, "text.color": COLORS["ink"],
+        "axes.spines.top": False, "axes.spines.right": False, "mathtext.fontset": "dejavusans",
+    })
+
+
+def _style_panel(ax: plt.Axes) -> None:
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.grid(True, axis="y", alpha=0.9)
+    ax.grid(False, axis="x")
+    ax.set_axisbelow(True)
+    ax.margins(x=0.02)
+    ax.tick_params(length=3, width=0.7)
 
 
 @dataclass
@@ -438,6 +486,63 @@ def compute_temporal_envelope(
     return x_days, median, p05, p95
 
 
+def _region_grid(region):
+    """Build a regular 2D grid (+ cell edges) from a CSEP region's midpoints."""
+    mid = np.asarray(region.midpoints(), dtype=float)
+    dh = float(getattr(region, "dh", DEFAULT_GRID_SPACING))
+    lons = np.unique(np.round(mid[:, 0], 5))
+    lats = np.unique(np.round(mid[:, 1], 5))
+    ix = np.searchsorted(lons, np.round(mid[:, 0], 5))
+    iy = np.searchsorted(lats, np.round(mid[:, 1], 5))
+
+    def to_grid(values):
+        g = np.full((lats.size, lons.size), np.nan)
+        g[iy, ix] = values
+        return g
+
+    lon_e = np.concatenate([lons - dh / 2, [lons[-1] + dh / 2]])
+    lat_e = np.concatenate([lats - dh / 2, [lats[-1] + dh / 2]])
+    extent = [float(lons.min() - dh / 2), float(lons.max() + dh / 2),
+              float(lats.min() - dh / 2), float(lats.max() + dh / 2)]
+    return lons, lats, lon_e, lat_e, to_grid, extent, dh
+
+
+def _basemap(ax, extent, left_labels=True):
+    ax.set_extent(extent, crs=ccrs.PlateCarree())
+    ax.add_feature(cfeature.OCEAN.with_scale("10m"), facecolor=COLORS["ocean"], zorder=0)
+    ax.add_feature(cfeature.LAND.with_scale("10m"), facecolor=COLORS["land"], zorder=0)
+    # white casing under a dark coastline so it survives over light and dark cells
+    ax.add_feature(cfeature.COASTLINE.with_scale("10m"), linewidth=1.4, edgecolor="white", zorder=4)
+    ax.add_feature(cfeature.COASTLINE.with_scale("10m"), linewidth=0.7, edgecolor=COLORS["coast"], zorder=5)
+    gl = ax.gridlines(draw_labels=True, alpha=0.45, linewidth=0.4, color="#AEB9C6", linestyle=(0, (2, 3)))
+    gl.top_labels = gl.right_labels = False
+    gl.left_labels = left_labels
+    gl.xlabel_style = {"size": 8, "color": COLORS["muted"]}
+    gl.ylabel_style = {"size": 8, "color": COLORS["muted"]}
+    for sp in ax.spines.values():
+        sp.set_visible(True)
+        sp.set_edgecolor(COLORS["neat"])
+        sp.set_linewidth(0.9)
+
+
+def _mag_sizes(mags, mc, base=9.0):
+    return base * 2.0 ** ((np.asarray(mags) - mc) / 0.5)
+
+
+def _map_colorbar(fig, ax, mappable, label, ticks=None, fmt=None):
+    """Native colorbar attached to the map axes (auto-sized to the map height)."""
+    cb = fig.colorbar(mappable, ax=ax, fraction=0.046, pad=0.02, extend="both", extendfrac=0.03)
+    if ticks is not None:
+        cb.set_ticks(ticks)
+    if fmt is not None:
+        cb.ax.yaxis.set_major_formatter(fmt)
+    cb.set_label(label, fontsize=9.3)
+    cb.ax.tick_params(labelsize=8.2)
+    cb.outline.set_edgecolor(COLORS["neat"])
+    cb.outline.set_linewidth(0.7)
+    return cb
+
+
 def plot_temporal_diagnostic(
     ax: plt.Axes,
     simulations: pd.DataFrame,
@@ -446,11 +551,12 @@ def plot_temporal_diagnostic(
     duration_days: float,
     n_catalogs: int,
 ) -> None:
+    _style_panel(ax)
     x_days, median, p05, p95 = compute_temporal_envelope(
         simulations, forecast_start, duration_days, n_catalogs
     )
-    ax.fill_between(x_days, p05, p95, color=COLORS["band"], alpha=0.5, label="5-95% ensemble")
-    ax.plot(x_days, median, color=COLORS["simulated"], linewidth=2.0, label="Median simulated")
+    ax.fill_between(x_days, p05, p95, color=COLORS["band"], alpha=0.6, label="Simulated 5–95%")
+    ax.plot(x_days, median, color=COLORS["median"], linewidth=2.0, label="Simulated median")
 
     if len(observed) > 0:
         obs = observed.copy()
@@ -459,14 +565,17 @@ def plot_temporal_diagnostic(
         obs_days = np.sort(
             ((obs["time"] - forecast_start).dt.total_seconds() / 86400.0).to_numpy()
         )
-        obs_curve = np.searchsorted(obs_days, x_days, side="right")
-        ax.step(x_days, obs_curve, where="post", color=COLORS["observed"], linewidth=2.2, label="Observed")
+        # exact cumulative step at true event times (prepend 0, extend to horizon)
+        step_x = np.concatenate(([0.0], obs_days, [float(duration_days)]))
+        step_y = np.concatenate((np.arange(obs_days.size + 1), [obs_days.size]))
+        ax.step(step_x, step_y, where="post", color=COLORS["observed"], linewidth=2.2, label="Observed")
 
     ax.set_title("Temporal Accumulation")
-    ax.set_xlabel("Days Since Forecast Start")
-    ax.set_ylabel("Cumulative Event Count")
-    ax.grid(True, alpha=0.25)
-    ax.legend(loc="upper left", frameon=True)
+    ax.set_xlabel("Days since forecast start")
+    ax.set_ylabel("Cumulative events")
+    ax.set_xlim(0, duration_days)
+    ax.set_ylim(bottom=0)
+    ax.legend(loc="upper left")
 
 
 def plot_magnitude_distribution_diagnostic(
@@ -475,313 +584,184 @@ def plot_magnitude_distribution_diagnostic(
     observed: pd.DataFrame,
     mc: float,
 ) -> None:
+    _style_panel(ax)
     mag_max = mc + 1.0
     if len(simulations) > 0:
         mag_max = max(mag_max, float(simulations["magnitude"].max()) + 0.2)
     if len(observed) > 0:
         mag_max = max(mag_max, float(observed["magnitude"].max()) + 0.2)
-
     bins = np.arange(mc, mag_max + 0.2, 0.1)
     if len(simulations) > 0:
-        ax.hist(
-            simulations["magnitude"],
-            bins=bins,
-            density=True,
-            alpha=0.55,
-            color=COLORS["simulated"],
-            label="Simulated union",
-        )
-
+        ax.hist(simulations["magnitude"], bins=bins, density=True, color=COLORS["band"],
+                edgecolor=COLORS["simulated"], linewidth=0.4, label="Simulated")
     if len(observed) > 0:
-        ax.hist(
-            observed["magnitude"],
-            bins=bins,
-            density=True,
-            histtype="step",
-            linewidth=2.2,
-            color=COLORS["observed"],
-            label="Observed",
-        )
-
+        ax.hist(observed["magnitude"], bins=bins, density=True, histtype="step",
+                linewidth=2.2, color=COLORS["observed"], label="Observed")
+    ax.set_yscale("log")
     ax.set_title("Magnitude Distribution")
     ax.set_xlabel("Magnitude")
-    ax.set_ylabel("Density")
-    ax.grid(True, alpha=0.25)
-    ax.legend(loc="upper right", frameon=True)
+    ax.set_ylabel("Density (log)")
+    ax.legend(loc="upper right")
 
 
-def plot_spatial_diagnostic(
-    ax: plt.Axes,
-    horizon_eval: HorizonEvaluation,
-    polygon_path: str,
-) -> None:
+def plot_spatial_diagnostic(ax, horizon_eval, mc):
     if horizon_eval.forecast.expected_rates is None:
         horizon_eval.forecast.get_expected_rates()
+    region = horizon_eval.forecast.region
+    rates = np.asarray(horizon_eval.forecast.expected_rates.spatial_counts(), dtype=float).ravel()
+    lons, lats, lon_e, lat_e, to_grid, extent, dh = _region_grid(region)
+    _basemap(ax, extent, left_labels=True)
 
-    spatial_rates = horizon_eval.forecast.expected_rates.spatial_counts()
-    midpoints = horizon_eval.forecast.region.midpoints()
-    positive = spatial_rates > 0
-
-    if positive.any():
-        marker_size = float(np.clip(9000 / max(positive.sum(), 1), 8, 28))
-        sc = ax.scatter(
-            midpoints[positive, 0],
-            midpoints[positive, 1],
-            c=spatial_rates[positive],
-            s=marker_size,
-            marker="s",
-            cmap="YlOrRd",
-            linewidths=0,
-            alpha=0.9,
-            transform=ccrs.PlateCarree(),
-        )
-        plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.04, label="Mean expected count")
+    cmap = plt.get_cmap("magma").copy()
+    cmap.set_bad(alpha=0)
+    pos = rates[rates > 0]
+    if pos.size:
+        vmin = max(np.percentile(pos, 2), 1e-3)
+        vmax = np.percentile(pos, 99.5)
+        # fill domain continuously (zero/very-low -> dark low end) and smooth
+        # across cell centres so the field reads as a continuous heatmap
+        rfill = np.where(rates > 0, rates, vmin)
+        pm = ax.pcolormesh(lons, lats, to_grid(rfill), cmap=cmap,
+                           norm=LogNorm(vmin=vmin, vmax=vmax, clip=True),
+                           transform=ccrs.PlateCarree(), shading="gouraud", rasterized=True, zorder=2)
+        _map_colorbar(ax.figure, ax, pm, "Expected count / cell (log)",
+                      ticks=LogLocator(base=10), fmt=LogFormatterMathtext(base=10))
 
     observed = horizon_eval.filtered_observed
     if len(observed) > 0:
-        obs_sizes = np.clip(16 * (10 ** (observed["magnitude"] - horizon_eval.observed_catalog.region.magnitudes.min())), 14, 240)
-        ax.scatter(
-            observed["longitude"],
-            observed["latitude"],
-            s=obs_sizes,
-            c=COLORS["observed"],
-            edgecolors="white",
-            linewidths=0.5,
-            alpha=0.85,
-            label="Observed",
-            transform=ccrs.PlateCarree(),
-        )
+        sc = ax.scatter(observed["longitude"], observed["latitude"],
+                        s=_mag_sizes(observed["magnitude"], mc),
+                        facecolor="none", edgecolor="white", linewidth=1.0, alpha=0.95,
+                        transform=ccrs.PlateCarree(), zorder=6)
+        sc.set_path_effects([pe.withStroke(linewidth=2.0, foreground="#101418")])
 
-    if os.path.exists(polygon_path):
-        coords = np.load(polygon_path)
-        ax.plot(coords[:, 1], coords[:, 0], color="black", linewidth=1.4, alpha=0.8, transform=ccrs.PlateCarree())
-
-    ax.add_feature(cfeature.LAND, facecolor='#F4F6F8')
-    ax.add_feature(cfeature.OCEAN, facecolor='#E3EDF3')
-    ax.coastlines(resolution='50m', linewidth=0.5)
-    
-    gl = ax.gridlines(draw_labels=True, alpha=0.2, color='gray')
-    gl.top_labels = False
-    gl.right_labels = False
-
-    ax.set_title("Expected Spatial Rate and Observations")
-    if len(observed) > 0:
-        ax.legend(loc="lower left", frameon=True)
+    ax.set_title(f"Expected Spatial Rate & Observed Events   ·   {dh:g}° cells, "
+                 f"{horizon_eval.duration_days:g} d")
 
 
-def plot_spatial_residual_diagnostic(
-    ax: plt.Axes,
-    horizon_eval: HorizonEvaluation,
-    polygon_path: str,
-) -> None:
+def plot_spatial_residual_diagnostic(ax, horizon_eval):
     if horizon_eval.forecast.expected_rates is None:
         horizon_eval.forecast.get_expected_rates()
-
-    spatial_rates = np.asarray(
-        horizon_eval.forecast.expected_rates.spatial_counts(), dtype=float
-    ).ravel()
+    region = horizon_eval.forecast.region
+    rates = np.asarray(horizon_eval.forecast.expected_rates.spatial_counts(), dtype=float).ravel()
     obs_spatial = np.asarray(horizon_eval.observed_catalog.spatial_counts(), dtype=float).ravel()
-    residual = obs_spatial - spatial_rates
-    midpoints = horizon_eval.forecast.region.midpoints()
-    active = (spatial_rates > 0) | (obs_spatial > 0)
+    residual = obs_spatial - rates
+    lons, lats, lon_e, lat_e, to_grid, extent, dh = _region_grid(region)
+    _basemap(ax, extent, left_labels=True)
 
+    cmap = plt.get_cmap("RdBu_r").copy()
+    cmap.set_bad(alpha=0)
+    active = (rates > 0) | (obs_spatial > 0)
     if active.any():
-        marker_size = float(np.clip(9000 / max(active.sum(), 1), 8, 28))
-        vmax = float(np.max(np.abs(residual[active])))
-        vmax = max(vmax, 1.0)
-        sc = ax.scatter(
-            midpoints[active, 0],
-            midpoints[active, 1],
-            c=residual[active],
-            s=marker_size,
-            marker="s",
-            cmap="coolwarm",
-            vmin=-vmax,
-            vmax=vmax,
-            linewidths=0,
-            alpha=0.95,
-            transform=ccrs.PlateCarree(),
-        )
-        plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.04, label="Observed - expected")
+        # hide negligible over-forecast speckle (cells with no obs and tiny rate)
+        show = active & ~((obs_spatial == 0) & (rates < 0.02))
+        vlim = max(np.percentile(np.abs(residual[active]), 98), 1.0)
+        grid = to_grid(np.where(show, residual, np.nan))
+        pm = ax.pcolormesh(lon_e, lat_e, grid, cmap=cmap,
+                           norm=TwoSlopeNorm(vcenter=0.0, vmin=-vlim, vmax=vlim),
+                           transform=ccrs.PlateCarree(), shading="flat", rasterized=True, zorder=2)
+        _map_colorbar(ax.figure, ax, pm, "Observed − Expected count / cell")
 
-    if os.path.exists(polygon_path):
-        coords = np.load(polygon_path)
-        ax.plot(coords[:, 1], coords[:, 0], color="black", linewidth=1.4, alpha=0.8, transform=ccrs.PlateCarree())
-
-    ax.add_feature(cfeature.LAND, facecolor='#F4F6F8')
-    ax.add_feature(cfeature.OCEAN, facecolor='#E3EDF3')
-    ax.coastlines(resolution='50m', linewidth=0.5)
-    
-    gl = ax.gridlines(draw_labels=True, alpha=0.2, color='gray')
-    gl.top_labels = False
-    gl.right_labels = False
-
-    ax.set_title("Spatial Residuals (Observed - Expected)")
+    ax.set_title("Spatial Residuals   ·   red = under, blue = over-forecast")
 
 
-def plot_count_bias_decomposition_panel(
-    ax: plt.Axes,
-    diagnostics: dict[str, Any],
-    show_legend: bool = True,
-) -> None:
-    expected_supported = diagnostics["expected_count_in_observed_cells"]
-    expected_empty = diagnostics["expected_count_in_empty_cells"]
-    observed_supported = diagnostics["observed_count_in_positive_rate_cells"]
-    observed_zero_rate = diagnostics["observed_count_in_zero_rate_cells"]
-
-    ax.barh(
-        [1],
-        [expected_supported],
-        color=COLORS["simulated"],
-        alpha=0.9,
-        label="Expected in observed cells",
-    )
-    ax.barh(
-        [1],
-        [expected_empty],
-        left=[expected_supported],
-        color=COLORS["accent"],
-        alpha=0.8,
-        label="Expected in empty cells",
-    )
-    ax.barh(
-        [0],
-        [observed_supported],
-        color=COLORS["good"],
-        alpha=0.9,
-        label="Observed in forecast-supported cells",
-    )
-    ax.barh(
-        [0],
-        [observed_zero_rate],
-        left=[observed_supported],
-        color=COLORS["bad"],
-        alpha=0.85,
-        label="Observed in zero-rate cells",
-    )
-
-    ax.set_yticks([1, 0], labels=["Simulated mean", "Observed"])
-    ax.set_xlabel("Event Count")
-    ax.set_title("Count Bias Decomposition")
-    ax.grid(True, axis="x", alpha=0.25)
+def plot_count_bias_decomposition_panel(ax, diagnostics, show_legend=True):
+    _style_panel(ax)
+    ax.grid(True, axis="x", alpha=0.9)
+    ax.grid(False, axis="y")
+    es = diagnostics["expected_count_in_observed_cells"]
+    ee = diagnostics["expected_count_in_empty_cells"]
+    osup = diagnostics["observed_count_in_positive_rate_cells"]
+    oz = diagnostics["observed_count_in_zero_rate_cells"]
+    ax.barh([1], [es], height=0.5, color=COLORS["cb_exp"], label="Exp · observed")
+    ax.barh([1], [ee], left=[es], height=0.5, color=COLORS["cb_emp"], label="Exp · empty")
+    ax.barh([0], [osup], height=0.5, color=COLORS["ob_sup"], label="Obs · forecast")
+    ax.barh([0], [oz], left=[osup], height=0.5, color=COLORS["ob_zero"], label="Obs · zero-rate")
+    ax.set_ylim(-0.55, 1.55)
+    ax.set_yticks([1, 0])
+    ax.set_yticklabels(["Simulated\nmean", "Observed"])
+    ax.set_xlabel("Event count")
+    ax.set_title("Count-Bias Decomp.")
     if show_legend:
-        ax.legend(loc="lower right", frameon=True, fontsize=9)
+        ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.2), fontsize=7.4, ncol=2,
+                  handlelength=1.1, columnspacing=1.0)
 
 
-def plot_text_summary(ax: plt.Axes, horizon_eval: HorizonEvaluation) -> None:
-    ax.axis("off")
-    diagnostics = horizon_eval.diagnostics
-    lines = [
-        f"Horizon: {horizon_eval.duration_days:g} days",
-        f"Observed events: {diagnostics['observed_filtered_count']}",
-        (
-            "Simulated count mean/median: "
-            f"{diagnostics['mean_simulated_filtered_count']:.1f} / "
-            f"{diagnostics['median_simulated_filtered_count']:.1f}"
-        ),
-        (
-            "Observed / simulated mean ratio: "
-            f"{diagnostics['observed_to_sim_mean_ratio']:.3f}"
-        ),
-        (
-            "Mean count bias (sim - obs): "
-            f"{diagnostics['sim_minus_obs_mean_bias']:.1f}"
-        ),
-        (
-            "Filtered outside analysis region: "
-            f"{diagnostics['simulation_outside_region_fraction']:.1%} sim events, "
-            f"{diagnostics['observed_outside_region_fraction']:.1%} observed"
-        ),
-        (
-            "Forecast-domain filter removed: "
-        f"{diagnostics['simulation_outside_region_count']} sim events, "
-        f"{diagnostics['observed_outside_region_count']} observed"
-        ),
-        (
-            "Observed occupied zero-rate cells: "
-            f"{diagnostics['zero_rate_observed_cells']}"
-        ),
-        (
-            "Observed events in zero-rate cells: "
-            f"{diagnostics['observed_count_in_zero_rate_cells']:.1f}"
-        ),
-        (
-            "Expected count in empty cells: "
-            f"{diagnostics['expected_count_in_empty_cells']:.1f} "
-            f"({diagnostics['expected_count_in_empty_cells_fraction']:.1%})"
-        ),
-        (
-            "Mean |spatial residual| per cell: "
-            f"{diagnostics['spatial_mean_abs_residual']:.3f}"
-        ),
-        (
-            "Observed mean/max M: "
-            f"{diagnostics['observed_mean_magnitude']:.2f} / "
-            f"{diagnostics['observed_max_magnitude']:.2f}"
-        ),
-        (
-            "Simulated union mean/max M: "
-            f"{diagnostics['simulated_mean_magnitude']:.2f} / "
-            f"{diagnostics['simulated_max_magnitude']:.2f}"
-        ),
-        "",
-    ]
-
-    for config in TEST_CONFIGS:
-        result = horizon_eval.results[config["key"]]
-        summary = summarize_result(result, one_sided_lower=config["one_sided_lower"])
-        consistent = summary["consistent"]
-        if consistent is None:
-            state = "not valid"
-        else:
-            state = "consistent" if consistent else "rejected"
-        lines.append(
-            f"{config['label']}: {state} "
-            f"(q=({summary['quantile_lower']:.3f}, {summary['quantile_upper']:.3f}), "
-            f"status={summary['status']})"
-        )
-
-    ax.text(
-        0.0,
-        1.0,
-        "\n".join(lines),
-        va="top",
-        ha="left",
-        fontsize=10,
-        family="monospace",
-        bbox={"boxstyle": "round,pad=0.5", "facecolor": "#F8FAFC", "edgecolor": "#CBD5E1"},
-    )
-
-
-def plot_result_panel(ax: plt.Axes, result: Any, title: str) -> None:
+def plot_test_panel(ax, result, label, one_sided_lower=None, show_obs_caption=False):
+    # Native pyCSEP test-distribution histogram -- kept in the original CSEP
+    # style on purpose (the four N/M/S/PL panels are not restyled).
     if result is None or len(getattr(result, "test_distribution", [])) == 0:
         ax.axis("off")
-        status = "not-run" if result is None else result.status
-        ax.text(
-            0.5,
-            0.5,
-            f"{title}\nstatus: {status}",
-            ha="center",
-            va="center",
-            fontsize=11,
-            bbox={"boxstyle": "round,pad=0.5", "facecolor": "#F8FAFC", "edgecolor": "#CBD5E1"},
-        )
+        ax.set_title(label)
+        status = "not-run" if result is None else getattr(result, "status", "no data")
+        ax.text(0.5, 0.5, f"status: {status}", ha="center", va="center", color=COLORS["muted"])
         return
-
     csep_plots.plot_test_distribution(result, ax=ax, show=False, legend=True)
-    ax.set_title(title)
-    if result.status != "normal":
-        ax.text(
-            0.98,
-            0.96,
-            f"status: {result.status}",
-            transform=ax.transAxes,
-            ha="right",
-            va="top",
-            fontsize=9,
-            color=COLORS["bad"],
-            bbox={"boxstyle": "round,pad=0.2", "facecolor": "white", "edgecolor": COLORS["bad"]},
-        )
+    ax.set_title(label)
+    if getattr(result, "status", "normal") != "normal":
+        ax.text(0.98, 0.96, f"status: {result.status}", transform=ax.transAxes,
+                ha="right", va="top", fontsize=9, color=COLORS["bad"],
+                bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor=COLORS["bad"]))
+
+
+def plot_dashboard_header(ax, metadata, horizon_eval):
+    ax.axis("off")
+    ax.add_patch(FancyBboxPatch((0, 0), 1, 1, boxstyle="round,pad=0,rounding_size=0.02",
+                 facecolor=COLORS["head_bg"], edgecolor="none", transform=ax.transAxes, clip_on=False))
+    ax.text(0.016, 0.66, "pyCSEP Catalog Evaluation Dashboard", fontsize=18, fontweight="bold",
+            color=COLORS["head_tx"], transform=ax.transAxes, va="center")
+    start = horizon_eval.forecast_start
+    end = (start + timedelta(days=float(horizon_eval.duration_days))).date()
+    ax.text(0.016, 0.24,
+            f"{metadata['run_label']}   ·   {horizon_eval.duration_days:g}-day horizon   ·   "
+            f"M ≥ {float(metadata['mc']):g}   ·   {horizon_eval.diagnostics['n_catalogs']} catalogs   ·   "
+            f"{start.date()} → {end}   ·   NZ testing region",
+            fontsize=10, color="#C7D2DD", transform=ax.transAxes, va="center")
+
+
+def plot_diagnostics_card(ax, horizon_eval):
+    ax.axis("off")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.set_title("Diagnostics")
+    diag = horizon_eval.diagnostics
+    labs = ["N", "M", "S", "PL"]
+    n = len(TEST_CONFIGS)
+    w = 1.0 / n
+    for i, config in enumerate(TEST_CONFIGS):
+        result = horizon_eval.results[config["key"]]
+        if result is None:
+            col, mark = COLORS["neutral"], "N/A"
+        else:
+            summary = summarize_result(result, one_sided_lower=config["one_sided_lower"])
+            cons = summary["consistent"]
+            col = COLORS["good"] if cons else (COLORS["bad"] if cons is not None else COLORS["neutral"])
+            mark = "PASS" if cons else ("FAIL" if cons is not None else "N/A")
+        x0 = i * w + 0.01
+        ax.add_patch(FancyBboxPatch((x0, 0.85), w - 0.02, 0.13, boxstyle="round,pad=0.004,rounding_size=0.02",
+                     facecolor=col, edgecolor="none", alpha=0.96, transform=ax.transAxes))
+        ax.text(x0 + (w - 0.02) / 2, 0.94, labs[i], ha="center", va="center", fontsize=10,
+                fontweight="bold", color="white", transform=ax.transAxes)
+        ax.text(x0 + (w - 0.02) / 2, 0.875, mark, ha="center", va="center", fontsize=7.2,
+                fontweight="bold", color="white", transform=ax.transAxes)
+    kpis = [
+        ("Observed events", f"{diag['observed_filtered_count']}"),
+        ("Sim N mean / median", f"{diag['mean_simulated_filtered_count']:.0f} / {diag['median_simulated_filtered_count']:.0f}"),
+        ("Obs / Sim ratio", f"{diag['observed_to_sim_mean_ratio']:.2f}"),
+        ("Count bias (sim−obs)", f"{diag['sim_minus_obs_mean_bias']:.0f}"),
+        ("Obs M mean / max", f"{diag['observed_mean_magnitude']:.2f} / {diag['observed_max_magnitude']:.2f}"),
+        ("Obs in zero-rate cells", f"{diag['observed_count_in_zero_rate_cells']:.0f}"),
+        ("Mean |resid| / cell", f"{diag['spatial_mean_abs_residual']:.3f}"),
+        ("Exp. in empty cells", f"{diag['expected_count_in_empty_cells']:.0f} ({diag['expected_count_in_empty_cells_fraction']:.0%})"),
+    ]
+    y = 0.745
+    dy = 0.092
+    for k, v in kpis:
+        ax.text(0.015, y, k, ha="left", va="center", fontsize=9.0, color=COLORS["muted"], transform=ax.transAxes)
+        ax.text(0.985, y, v, ha="right", va="center", fontsize=10.3, fontweight="bold",
+                color=COLORS["ink"], family=MONO, transform=ax.transAxes)
+        ax.plot([0.015, 0.985], [y - dy / 2, y - dy / 2], color=COLORS["hair"], lw=0.7, transform=ax.transAxes)
+        y -= dy
 
 
 def plot_horizon_dashboard(
@@ -789,18 +769,33 @@ def plot_horizon_dashboard(
     metadata: dict[str, Any],
     output_path: str,
 ) -> None:
-    fig, axes = plt.subplots(5, 2, figsize=(17, 22))
-    axes_flat = axes.flatten()
+    apply_dashboard_style()
+    mc = float(metadata["mc"])
 
-    for idx, config in enumerate(TEST_CONFIGS):
-        plot_result_panel(
-            axes_flat[idx],
+    # Manual layout -- constrained_layout collapses with cartopy GeoAxes.
+    fig = plt.figure(figsize=(18, 15.0), dpi=200)
+    gs = fig.add_gridspec(4, 12, height_ratios=[0.30, 0.92, 2.55, 1.18],
+                          left=0.045, right=0.965, top=0.955, bottom=0.045,
+                          hspace=0.45, wspace=0.85)
+
+    plot_dashboard_header(fig.add_subplot(gs[0, :]), metadata, horizon_eval)
+
+    for i, config in enumerate(TEST_CONFIGS):
+        plot_test_panel(
+            fig.add_subplot(gs[1, i * 3:i * 3 + 3]),
             horizon_eval.results[config["key"]],
             config["label"],
+            config["one_sided_lower"],
+            show_obs_caption=(i == 0),
         )
 
+    axm1 = fig.add_subplot(gs[2, 0:6], projection=ccrs.Mercator())
+    axm2 = fig.add_subplot(gs[2, 6:12], projection=ccrs.Mercator())
+    plot_spatial_diagnostic(axm1, horizon_eval, mc)
+    plot_spatial_residual_diagnostic(axm2, horizon_eval)
+
     plot_temporal_diagnostic(
-        axes_flat[4],
+        fig.add_subplot(gs[3, 0:4]),
         horizon_eval.filtered_simulations,
         horizon_eval.filtered_observed,
         horizon_eval.forecast_start,
@@ -808,34 +803,15 @@ def plot_horizon_dashboard(
         horizon_eval.diagnostics["n_catalogs"],
     )
     plot_magnitude_distribution_diagnostic(
-        axes_flat[5],
+        fig.add_subplot(gs[3, 4:7]),
         horizon_eval.filtered_simulations,
         horizon_eval.filtered_observed,
-        float(metadata["mc"]),
+        mc,
     )
-    
-    # Replace standard axes with Cartopy GeoAxes for spatial plots
-    gs6 = axes_flat[6].get_subplotspec()
-    axes_flat[6].remove()
-    ax6 = fig.add_subplot(gs6, projection=ccrs.Mercator())
-    plot_spatial_diagnostic(ax6, horizon_eval, metadata["polygon_path"])
-    
-    gs7 = axes_flat[7].get_subplotspec()
-    axes_flat[7].remove()
-    ax7 = fig.add_subplot(gs7, projection=ccrs.Mercator())
-    plot_spatial_residual_diagnostic(ax7, horizon_eval, metadata["polygon_path"])
-    
-    plot_count_bias_decomposition_panel(axes_flat[8], horizon_eval.diagnostics)
-    plot_text_summary(axes_flat[9], horizon_eval)
+    plot_count_bias_decomposition_panel(fig.add_subplot(gs[3, 7:9]), horizon_eval.diagnostics)
+    plot_diagnostics_card(fig.add_subplot(gs[3, 9:12]), horizon_eval)
 
-    fig.suptitle(
-        f"pyCSEP Catalog Evaluation Dashboard\n"
-        f"{metadata['run_label']} | {horizon_eval.duration_days:g}-day horizon",
-        fontsize=16,
-        fontweight="bold",
-    )
-    fig.tight_layout(rect=[0, 0, 1, 0.97])
-    fig.savefig(output_path, dpi=180)
+    fig.savefig(output_path, dpi=200)
     plt.close(fig)
 
 

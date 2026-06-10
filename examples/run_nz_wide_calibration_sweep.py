@@ -182,6 +182,16 @@ def parse_args() -> argparse.Namespace:
         help="Continue the sweep if one scenario fails.",
     )
     parser.add_argument(
+        "--allow-degenerate-inversion",
+        action="store_true",
+        help=(
+            "Forward --allow-degenerate-inversion to the forecast runner so "
+            "scenarios proceed even if the inversion is degenerate (collapsed "
+            "to no triggering, or supercritical with branching ratio >= 1). "
+            "Without this, such scenarios abort before simulation."
+        ),
+    )
+    parser.add_argument(
         "--pycsep-region-source",
         choices=["forecast_domain", "nz_csep_collection"],
         default="forecast_domain",
@@ -425,6 +435,8 @@ def run_scenario(
         )
     if args.skip_plots:
         command.append("--skip-plots")
+    if args.allow_degenerate_inversion:
+        command.append("--allow-degenerate-inversion")
     if needs_forced_reinvert:
         command.append("--force-reinvert")
 

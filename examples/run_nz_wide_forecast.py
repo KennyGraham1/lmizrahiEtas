@@ -38,8 +38,13 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(BASE_DIR)
 INPUT_DATA_DIR = os.path.join(ROOT_DIR, "input_data")
 
-sys.path.append(ROOT_DIR)
-sys.path.append(os.path.join(ROOT_DIR, "SeismoStats"))
+# Insert at the front so the in-repo `etas/` and `SeismoStats/` take
+# precedence over any copy pip-installed into the active environment.
+# (A non-editable `etas` install in site-packages would otherwise shadow
+# the repo when this script is launched from examples/, silently running
+# stale code.)
+sys.path.insert(0, os.path.join(ROOT_DIR, "SeismoStats"))
+sys.path.insert(0, ROOT_DIR)
 
 from etas import set_up_logger
 from etas.inversion import (
@@ -527,19 +532,24 @@ def guard_against_degenerate_inversion(
     if degenerate:
         reasons = "; ".join(info["reasons"])
         message = (
-            "ETAS inversion is degenerate (%s). The fitted model has essentially "
-            "no triggering and would produce a stationary background-only "
-            "forecast. This typically means the spatial background term "
-            "(bg_term) over-explains the catalog. Aborting before simulation."
+            "ETAS inversion is degenerate (%s) and would produce an unreliable "
+            "forecast. A sub-critical branching ratio means essentially no "
+            "triggering (stationary background-only forecast, usually a "
+            "spatial background term that over-explains the catalog); a "
+            "super-critical ratio (>= 1) means triggering never dies out, so "
+            "the forecast is non-stationary and over-predicts. Aborting before "
+            "simulation."
         )
         if allow_degenerate:
             logger.warning(message + " Continuing anyway (--allow-degenerate-inversion).", reasons)
         else:
             raise RuntimeError(
                 (message % reasons)
-                + " Re-run without --background-rate-file to use a homogeneous "
-                "background, supply a declustered/independent background grid, "
-                "or pass --allow-degenerate-inversion to override."
+                + " For a collapsed fit, re-run without --background-rate-file "
+                "(homogeneous background) or supply a declustered/independent "
+                "background grid; for a supercritical fit, constrain the "
+                "branching ratio below 1. Or pass --allow-degenerate-inversion "
+                "to override."
             )
     return info
 

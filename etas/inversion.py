@@ -254,7 +254,8 @@ def branching_ratio(theta, beta, dm_max=None):
 
 
 def assess_inversion_degeneracy(theta, beta, n_hat=None, dm_max=None,
-                                min_branching_ratio=0.02):
+                                min_branching_ratio=0.02,
+                                max_branching_ratio=1.0):
     """
     Diagnose whether an inverted ETAS parameter set has collapsed to a
     degenerate, triggering-free solution.
@@ -278,6 +279,10 @@ def assess_inversion_degeneracy(theta, beta, n_hat=None, dm_max=None,
         Passed through to :func:`branching_ratio`.
     min_branching_ratio : float
         Branching ratios below this are treated as "no triggering".
+    max_branching_ratio : float
+        Branching ratios at or above this are treated as supercritical
+        (triggering does not die out), which yields non-stationary forecasts
+        that grow without bound and over-predict.
 
     Returns
     -------
@@ -308,6 +313,13 @@ def assess_inversion_degeneracy(theta, beta, n_hat=None, dm_max=None,
         reasons.append(
             "branching ratio {:.4g} below {:.4g} "
             "(essentially no triggering)".format(eta, min_branching_ratio)
+        )
+    elif eta >= max_branching_ratio:
+        reasons.append(
+            "branching ratio {:.4g} at or above {:.4g} (supercritical: "
+            "aftershock triggering does not die out, so simulated forecasts "
+            "are non-stationary and over-predict)".format(
+                eta, max_branching_ratio)
         )
 
     if n_hat is not None and np.isfinite(n_hat) and n_hat <= 0:
@@ -1414,11 +1426,14 @@ class ETASParameterCalculation:
         )
         if self.degenerate:
             self.logger.warning(
-                "INVERSION LOOKS DEGENERATE (%s). The fitted model has little "
-                "or no ETAS triggering, so simulated forecasts will behave like "
-                "a stationary background model. Common cause: a spatial "
-                "background covariate (bg_term) that over-explains the catalog. "
-                "Inspect the background term before using these parameters.",
+                "INVERSION LOOKS DEGENERATE (%s). The fitted ETAS parameters "
+                "are pathological, so simulated forecasts will be unreliable. "
+                "A sub-critical branching ratio (little/no triggering) usually "
+                "means a spatial background covariate (bg_term) over-explains "
+                "the catalog; a super-critical ratio (>= 1) means triggering "
+                "never dies out and forecasts grow without bound. Inspect the "
+                "background term and branching ratio before using these "
+                "parameters.",
                 "; ".join(self.degeneracy_info["reasons"]),
             )
 

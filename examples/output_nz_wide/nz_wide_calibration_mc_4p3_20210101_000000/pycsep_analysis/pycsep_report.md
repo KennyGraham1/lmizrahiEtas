@@ -8,7 +8,7 @@
 
 ## Key Findings
 
-- The ensemble overpredicts event counts on average; observed / simulated mean ratio is `0.856`.
+- The ensemble overpredicts event counts on average; observed / simulated mean ratio is `0.859`.
 - Catalog N-Test is consistent in `2/5` horizons.
 - Catalog M-Test is consistent in `5/5` horizons.
 - Catalog S-Test is consistent in `5/5` horizons.
@@ -21,48 +21,48 @@
 
 | Horizon (days) | Observed | Sim mean | N | M | S | PL | Zero-rate obs cells |
 | --- | ---: | ---: | --- | --- | --- | --- | ---: |
-| 365.000 | 208 | 162.954 | normal (1) | normal (1) | normal (1) | normal (1) | 0 |
-| 730.000 | 301 | 334.861 | normal (1) | normal (1) | normal (1) | normal (1) | 0 |
-| 1095.000 | 391 | 511.050 | normal (0) | normal (1) | normal (1) | normal (1) | 0 |
-| 1461.000 | 473 | 690.611 | normal (0) | normal (1) | undersampled (1) | undersampled (1) | 2 |
-| 1826.000 | 575 | 875.489 | normal (0) | normal (1) | undersampled (1) | undersampled (1) | 1 |
+| 365.000 | 208 | 162.331 | normal (1) | normal (1) | normal (1) | normal (1) | 0 |
+| 730.000 | 301 | 334.667 | normal (1) | normal (1) | normal (1) | normal (1) | 0 |
+| 1095.000 | 391 | 511.478 | normal (0) | normal (1) | normal (1) | normal (1) | 0 |
+| 1461.000 | 473 | 687.430 | normal (0) | normal (1) | undersampled (1) | undersampled (1) | 1 |
+| 1826.000 | 575 | 868.665 | normal (0) | normal (1) | undersampled (1) | undersampled (1) | 2 |
 
 ## Calibration Summary
 
-- Catalog N-Test: calibration p-value = `0.023`
-- Catalog M-Test: calibration p-value = `0.726`
-- Catalog S-Test: calibration p-value = `0.267`
-- Catalog PL-Test: calibration p-value = `0.028`
+- Catalog N-Test: calibration p-value = `0.027`
+- Catalog M-Test: calibration p-value = `0.749`
+- Catalog S-Test: calibration p-value = `0.252`
+- Catalog PL-Test: calibration p-value = `0.020`
 
 ## Additional Diagnostics
 
 | Horizon (days) | Obs/Sim mean ratio | Sim-Obs mean bias | Sim outside region (%) | Obs outside region (%) |
 | --- | ---: | ---: | ---: | ---: |
-| 365.000 | 1.276 | -45.046 | 0.000 | 0.000 |
-| 730.000 | 0.899 | 33.861 | 0.000 | 0.000 |
-| 1095.000 | 0.765 | 120.050 | 0.000 | 0.000 |
-| 1461.000 | 0.685 | 217.611 | 0.000 | 0.000 |
-| 1826.000 | 0.657 | 300.489 | 0.000 | 0.000 |
+| 365.000 | 1.281 | -45.669 | 0.000 | 0.000 |
+| 730.000 | 0.899 | 33.667 | 0.000 | 0.000 |
+| 1095.000 | 0.764 | 120.478 | 0.000 | 0.000 |
+| 1461.000 | 0.688 | 214.430 | 0.000 | 0.000 |
+| 1826.000 | 0.662 | 293.665 | 0.000 | 0.000 |
 
 ## Spatial Residual Diagnostics
 
 | Horizon (days) | Expected in observed cells | Expected in empty cells | Observed in zero-rate cells | Mean abs(obs-exp) per cell |
 | --- | ---: | ---: | ---: | ---: |
-| 365.000 | 7.277 | 155.678 | 0.000 | 0.017 |
-| 730.000 | 23.774 | 311.087 | 0.000 | 0.028 |
-| 1095.000 | 47.964 | 463.085 | 0.000 | 0.038 |
-| 1461.000 | 80.951 | 609.660 | 2.000 | 0.048 |
-| 1826.000 | 119.655 | 755.833 | 1.000 | 0.058 |
+| 365.000 | 7.399 | 154.932 | 0.000 | 0.017 |
+| 730.000 | 23.956 | 310.711 | 0.000 | 0.028 |
+| 1095.000 | 47.793 | 463.685 | 0.000 | 0.039 |
+| 1461.000 | 80.081 | 607.350 | 1.000 | 0.048 |
+| 1826.000 | 118.301 | 750.365 | 2.000 | 0.058 |
 
 ## Peak Residual Cells
 
 | Horizon (days) | Largest underforecast cell (lon, lat, obs-exp) | Largest overforecast cell (lon, lat, obs-exp) |
 | --- | --- | --- |
-| 365.000 | (179.850, -37.450, 18.934) | (174.250, -41.750, -0.701) |
-| 730.000 | (179.850, -37.450, 19.842) | (174.350, -41.650, -1.052) |
-| 1095.000 | (179.850, -37.450, 19.761) | (174.350, -41.650, -1.595) |
-| 1461.000 | (179.850, -37.450, 19.686) | (174.350, -41.650, -2.077) |
-| 1826.000 | (179.850, -37.450, 19.567) | (174.350, -41.650, -2.566) |
+| 365.000 | (179.850, -37.450, 18.931) | (174.250, -41.750, -0.668) |
+| 730.000 | (179.850, -37.450, 19.855) | (174.350, -41.650, -1.067) |
+| 1095.000 | (179.850, -37.450, 19.753) | (174.350, -41.650, -1.591) |
+| 1461.000 | (179.850, -37.450, 19.676) | (174.350, -41.650, -2.076) |
+| 1826.000 | (179.850, -37.450, 19.580) | (174.350, -41.650, -2.478) |
 
 ## Notes
 
