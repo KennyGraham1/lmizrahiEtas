@@ -2310,141 +2310,192 @@ if __name__ == "__main__":
     print(f"🌐 Open dashboard: {dashboard_path}")
     print("="*60 + "\n")
 
-def plot_csep_6panel(simulations: pd.DataFrame, observed: pd.DataFrame, 
+def plot_csep_6panel(simulations: pd.DataFrame, observed: pd.DataFrame,
                      forecast_config: dict, output_path: str = None):
     """
     Create a publication-quality 6-panel CSEP-style validation plot.
+
+    Layout: context banner, a row of consistency-test panels (N-test,
+    M-test, magnitude-frequency on log scale), and a row of maps
+    (forecast/observed overlay, forecast spatial density, observed
+    epicentres).
     """
-    import matplotlib.patheffects as pe
+    import matplotlib.ticker as mticker
+    from matplotlib.colors import LogNorm
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
 
     # ── Design tokens ──────────────────────────────────────────────────
-    _BG = "#F7F9FC"
+    _BG = "#FFFFFF"
     _PANEL = "#FFFFFF"
-    _GRID = "#E2E8F0"
+    _GRID = "#D9E2EC"
     _TEXT = "#2D3748"
-    _SUB = "#718096"
-    _NAVY = "#0D1B2A"
-    _SIM_CLR = "#3B82F6"
-    _OBS_CLR = "#DC2626"
-    _MEAN_CLR = "#6366F1"
-    _P95_CLR = "#F59E0B"
-    _PASS = "#10B981"
-    _FAIL = "#EF4444"
+    _SUB = "#64748B"
+    _NAVY = "#102A43"
+    _SIM_CLR = "#2F6DB5"     # simulations: steel blue everywhere
+    _OBS_CLR = "#C0392B"     # observations: deep red everywhere
+    _MEAN_CLR = "#0F766E"
+    _BAND_CLR = "#94A3B8"
+    _PASS = "#0E9F6E"
+    _FAIL = "#DC2626"
+    _LAND = "#F1EFE9"
+    _OCEAN = "#EAF2F8"
+    _COAST = "#5B6B7A"
+    _REGION = "#334155"
 
     def _style(ax, title, xlabel="", ylabel=""):
         ax.set_facecolor(_PANEL)
         ax.set_title(title, fontsize=13, fontweight="bold", color=_NAVY, pad=10, loc="left")
-        if xlabel: ax.set_xlabel(xlabel, fontsize=10, color=_TEXT)
-        if ylabel: ax.set_ylabel(ylabel, fontsize=10, color=_TEXT)
+        if xlabel: ax.set_xlabel(xlabel, fontsize=11, color=_TEXT)
+        if ylabel: ax.set_ylabel(ylabel, fontsize=11, color=_TEXT)
         for s in ax.spines.values():
             s.set_color(_GRID); s.set_linewidth(0.8)
-        ax.tick_params(colors=_TEXT, labelsize=9)
-        ax.grid(True, alpha=0.35, color=_GRID, linewidth=0.6)
+        ax.tick_params(colors=_TEXT, labelsize=10)
+        ax.grid(True, alpha=0.45, color=_GRID, linewidth=0.6)
+        ax.set_axisbelow(True)
 
-    # ── Common data ────────────────────────────────────────────────────
+    def _map_title(ax, title):
+        ax.set_title(title, fontsize=13, fontweight="bold", color=_NAVY, pad=10, loc="left")
+
+    # ── Common data & test statistics ──────────────────────────────────
     obs_count = len(observed)
-    sim_counts = simulations.groupby("catalog_id").size()
-    sim_max_mags = simulations.groupby("catalog_id")["magnitude"].max()
-    obs_max_mag = observed["magnitude"].max() if obs_count > 0 else 0
     mc = forecast_config.get("mc", 4.1)
 
-    # ── Figure layout ──────────────────────────────────────────────────
-    fig = plt.figure(figsize=(20, 15), facecolor=_BG)
-    gs = GridSpec(4, 2, figure=fig, height_ratios=[0.12, 1, 1, 1],
-                  hspace=0.30, wspace=0.22, left=0.06, right=0.96, top=0.97, bottom=0.04)
+    # Catalogs whose events all fell below threshold / outside the region
+    # are absent from the CSV; they are legitimate zero-count forecasts.
+    id_min = int(simulations["catalog_id"].min())
+    id_max = int(simulations["catalog_id"].max())
+    sim_counts = (
+        simulations.groupby("catalog_id").size()
+        .reindex(np.arange(id_min, id_max + 1), fill_value=0)
+    )
+    n_sims_val = len(sim_counts)
+    sim_max_mags = simulations.groupby("catalog_id")["magnitude"].max()
+    obs_max_mag = observed["magnitude"].max() if obs_count > 0 else 0.0
 
-    # ── Row 0: Context banner ──────────────────────────────────────────
+    quantile = (sim_counts < obs_count).mean()
+    n_status = "PASS" if 0.025 < quantile < 0.975 else "FAIL"
+    n_badge_clr = _PASS if n_status == "PASS" else _FAIL
+
+    delta_1 = (sim_max_mags < obs_max_mag).sum() / len(sim_max_mags)
+    delta_2 = (sim_max_mags <= obs_max_mag).sum() / len(sim_max_mags)
+    delta = (delta_1 + delta_2) / 2
+    m_status = "PASS" if 0.025 < delta < 0.975 else "FAIL"
+    m_badge_clr = _PASS if m_status == "PASS" else _FAIL
+
+    # ── Figure layout: banner / tests row / maps row ───────────────────
+    fig = plt.figure(figsize=(18, 11.2), facecolor=_BG)
+    gs = GridSpec(3, 3, figure=fig, height_ratios=[0.18, 0.92, 1.08],
+                  hspace=0.32, wspace=0.22,
+                  left=0.05, right=0.97, top=0.98, bottom=0.05)
+
+    # ── Banner ─────────────────────────────────────────────────────────
     ax_ban = fig.add_subplot(gs[0, :])
     ax_ban.set_xlim(0, 1); ax_ban.set_ylim(0, 1); ax_ban.axis("off")
     duration = forecast_config.get("duration_days", "?")
     f_start = str(forecast_config.get("forecast_start", ""))[:10]
-    n_sims_val = simulations["catalog_id"].nunique()
-    ax_ban.text(0.5, 0.75, "CSEP Forecast Evaluation", ha="center", va="top",
-                fontsize=18, fontweight="bold", color=_NAVY)
-    meta = f"Horizon: {duration} days  ·  Origin: {f_start}  ·  Mc = {mc}  ·  {n_sims_val} simulations  ·  {obs_count} observed"
-    ax_ban.text(0.5, 0.15, meta, ha="center", va="center", fontsize=10, color=_SUB)
-    ax_ban.axhline(0.0, color=_GRID, linewidth=1.5)
+    ax_ban.text(0.0, 0.98, "CSEP Forecast Evaluation", ha="left", va="top",
+                fontsize=19, fontweight="bold", color=_NAVY)
+    meta = (f"Horizon {duration} days   ·   Origin {f_start}   ·   "
+            f"Mc {mc}   ·   {n_sims_val} simulated catalogs   ·   "
+            f"{obs_count} observed events")
+    ax_ban.text(0.0, 0.04, meta, ha="left", va="bottom", fontsize=11.5, color=_SUB)
+    for x_anchor, label, status, clr in (
+        (1.0, "M-test", m_status, m_badge_clr),
+        (0.91, "N-test", n_status, n_badge_clr),
+    ):
+        ax_ban.text(x_anchor, 0.5, f"{label}: {status}", ha="right", va="center",
+                    fontsize=11.5, fontweight="bold", color=clr,
+                    bbox=dict(boxstyle="round,pad=0.45", facecolor="white",
+                              edgecolor=clr, linewidth=1.2))
+    ax_ban.axhline(-0.30, color=_GRID, linewidth=1.2, clip_on=False)
 
-    # ── Panel 1: N-Test ────────────────────────────────────────────────
+    # ── Panel (a): N-test ──────────────────────────────────────────────
     ax1 = fig.add_subplot(gs[1, 0])
-    _style(ax1, "N-Test  (Event Count)", xlabel="Number of Events", ylabel="Frequency")
-    ax1.hist(sim_counts, bins=30, color=_SIM_CLR, edgecolor="white", linewidth=0.8,
-             alpha=0.75, label="Forecast simulations", zorder=3)
-    ax1.axvline(obs_count, color=_OBS_CLR, linewidth=2.5, label=f"Observed: {obs_count}", zorder=5)
-    ax1.axvline(sim_counts.mean(), color=_MEAN_CLR, linestyle="--", linewidth=1.5,
-                label=f"Mean: {sim_counts.mean():.0f}", zorder=4)
-    quantile = (sim_counts < obs_count).mean()
-    status = "PASS" if 0.025 < quantile < 0.975 else "FAIL"
-    badge_clr = _PASS if status == "PASS" else _FAIL
-    ax1.text(0.98, 0.95, f"q = {quantile:.3f}\n{status}", transform=ax1.transAxes,
-             ha="right", va="top", fontsize=11, fontweight="bold", color=badge_clr,
-             bbox=dict(boxstyle="round,pad=0.4", facecolor="white", edgecolor=badge_clr, alpha=0.95))
-    ax1.legend(loc="upper left", frameon=True, framealpha=0.95, edgecolor=_GRID, fontsize=9)
+    _style(ax1, "(a)  N-test — event count", xlabel="Events per catalog", ylabel="Number of catalogs")
+    n_lo, n_hi = sim_counts.quantile([0.025, 0.975])
+    ax1.axvspan(n_lo, n_hi, color=_BAND_CLR, alpha=0.16, zorder=1)
+    ax1.hist(sim_counts, bins=30, color=_SIM_CLR, edgecolor="white", linewidth=0.7,
+             alpha=0.85, zorder=3)
+    ax1.axvline(sim_counts.mean(), color=_MEAN_CLR, linestyle="--", linewidth=1.6, zorder=4)
+    ax1.axvline(obs_count, color=_OBS_CLR, linewidth=2.4, zorder=5)
+    ax1.text(0.975, 0.96, f"$q$ = {quantile:.3f}\n{n_status}", transform=ax1.transAxes,
+             ha="right", va="top", fontsize=11.5, fontweight="bold", color=n_badge_clr,
+             bbox=dict(boxstyle="round,pad=0.4", facecolor="white",
+                       edgecolor=n_badge_clr, linewidth=1.2))
+    ax1.legend(handles=[
+        Patch(facecolor=_SIM_CLR, alpha=0.85, label="Forecast catalogs"),
+        Patch(facecolor=_BAND_CLR, alpha=0.30, label="95% forecast range"),
+        Line2D([], [], color=_MEAN_CLR, ls="--", lw=1.6,
+               label=f"Forecast mean ({sim_counts.mean():.0f})"),
+        Line2D([], [], color=_OBS_CLR, lw=2.4, label=f"Observed ({obs_count})"),
+    ], loc="upper left", frameon=True, framealpha=0.95, edgecolor=_GRID, fontsize=9.5)
 
-    # ── Panel 2: M-Test ────────────────────────────────────────────────
+    # ── Panel (b): M-test ──────────────────────────────────────────────
     ax2 = fig.add_subplot(gs[1, 1])
-    _style(ax2, "M-Test  (Maximum Magnitude)", xlabel="Maximum Magnitude", ylabel="Frequency")
-    ax2.hist(sim_max_mags, bins=20, color=_P95_CLR, edgecolor="white", linewidth=0.8,
-             alpha=0.75, label="Forecast simulations", zorder=3)
-    ax2.axvline(obs_max_mag, color=_SIM_CLR, linewidth=2.5,
-                label=f"Observed: M{obs_max_mag:.1f}", zorder=5)
-    p95 = sim_max_mags.quantile(0.95)
-    ax2.axvline(p95, color=_OBS_CLR, linestyle="--", linewidth=1.5, label="95th percentile", zorder=4)
-    delta_1 = ((sim_max_mags < obs_max_mag).sum()) / len(sim_max_mags)
-    delta_2 = ((sim_max_mags <= obs_max_mag).sum()) / len(sim_max_mags)
-    delta = (delta_1 + delta_2) / 2
-    m_status = "PASS" if 0.025 < delta < 0.975 else "FAIL"
-    m_badge = _PASS if m_status == "PASS" else _FAIL
-    ax2.text(0.98, 0.95, f"δ = {delta:.3f}\n{m_status}", transform=ax2.transAxes,
-             ha="right", va="top", fontsize=11, fontweight="bold", color=m_badge,
-             bbox=dict(boxstyle="round,pad=0.4", facecolor="white", edgecolor=m_badge, alpha=0.95))
-    ax2.legend(loc="upper left", frameon=True, framealpha=0.95, edgecolor=_GRID, fontsize=9)
+    _style(ax2, "(b)  M-test — maximum magnitude", xlabel="Maximum magnitude per catalog",
+           ylabel="Number of catalogs")
+    m_lo, m_hi = sim_max_mags.quantile([0.025, 0.975])
+    mmax_bins = np.arange(np.floor(sim_max_mags.min() * 10) / 10 - 0.05,
+                          max(sim_max_mags.max(), obs_max_mag) + 0.15, 0.1)
+    ax2.axvspan(m_lo, m_hi, color=_BAND_CLR, alpha=0.16, zorder=1)
+    ax2.hist(sim_max_mags, bins=mmax_bins, color=_SIM_CLR, edgecolor="white",
+             linewidth=0.7, alpha=0.85, zorder=3)
+    ax2.axvline(obs_max_mag, color=_OBS_CLR, linewidth=2.4, zorder=5)
+    ax2.text(0.975, 0.96, f"$\\delta$ = {delta:.3f}\n{m_status}", transform=ax2.transAxes,
+             ha="right", va="top", fontsize=11.5, fontweight="bold", color=m_badge_clr,
+             bbox=dict(boxstyle="round,pad=0.4", facecolor="white",
+                       edgecolor=m_badge_clr, linewidth=1.2))
+    ax2.legend(handles=[
+        Patch(facecolor=_SIM_CLR, alpha=0.85, label="Forecast catalogs"),
+        Patch(facecolor=_BAND_CLR, alpha=0.30, label="95% forecast range"),
+        Line2D([], [], color=_OBS_CLR, lw=2.4, label=f"Observed max (M{obs_max_mag:.1f})"),
+    ], loc="upper left", frameon=True, framealpha=0.95, edgecolor=_GRID, fontsize=9.5)
 
-    # ── Panel 3: Magnitude Distribution ────────────────────────────────
-    ax3 = fig.add_subplot(gs[2, 0])
-    _style(ax3, "Magnitude Distribution", xlabel="Magnitude", ylabel="Probability Density")
-    mag_bins = np.arange(mc, 8.0, 0.2)
-    ax3.hist(simulations["magnitude"], bins=mag_bins, density=True, alpha=0.55,
-             color=_SIM_CLR, edgecolor="white", linewidth=0.6,
-             label=f"Forecast ({n_sims_val} sims)", zorder=3)
+    # ── Panel (c): magnitude-frequency distribution ────────────────────
+    ax3 = fig.add_subplot(gs[1, 2])
+    _style(ax3, "(c)  Magnitude–frequency distribution", xlabel="Magnitude",
+           ylabel="Probability density")
+    mag_upper = max(8.0, float(simulations["magnitude"].max()),
+                    float(obs_max_mag)) + 0.2
+    mag_bins = np.arange(mc - 0.05, mag_upper, 0.2)
+    ax3.hist(simulations["magnitude"], bins=mag_bins, density=True, alpha=0.65,
+             color=_SIM_CLR, edgecolor="white", linewidth=0.5,
+             label=f"Forecast ({n_sims_val} catalogs)", zorder=3)
     if obs_count > 0:
         ax3.hist(observed["magnitude"], bins=mag_bins, density=True, histtype="step",
-                 linewidth=2.5, color=_OBS_CLR, label="Observed", zorder=5)
-    ax3.legend(loc="upper right", frameon=True, framealpha=0.95, edgecolor=_GRID, fontsize=9)
+                 linewidth=2.2, color=_OBS_CLR, label="Observed", zorder=5)
+    ax3.set_yscale("log")
+    ax3.set_xlim(mc - 0.2, max(float(simulations["magnitude"].max()),
+                               float(obs_max_mag)) + 0.3)
+    ax3.legend(loc="upper right", frameon=True, framealpha=0.95,
+               edgecolor=_GRID, fontsize=9.5)
 
-    # Spatial Setup
-    # Calculate extent from data
+    # ── Spatial setup ──────────────────────────────────────────────────
     all_lons = pd.concat([simulations["longitude"], observed["longitude"]])
     all_lats = pd.concat([simulations["latitude"], observed["latitude"]])
-    lon_margin = 0.5
-    lat_margin = 0.5
-    
-    # Data extent in standard coordinates
-    lon_min, lon_max = all_lons.min()-lon_margin, all_lons.max()+lon_margin
-    lat_min, lat_max = all_lats.min()-lat_margin, all_lats.max()+lat_margin
-    central_lon = (lon_min + lon_max) / 2  # Center on data
-    
+    lon_min, lon_max = all_lons.min() - 0.4, all_lons.max() + 0.4
+    lat_min, lat_max = all_lats.min() - 0.4, all_lats.max() + 0.4
+    central_lon = (lon_min + lon_max) / 2
+    extent = [lon_min, lon_max, lat_min, lat_max]
+
     try:
         import cartopy.crs as ccrs
         import cartopy.feature as cfeature
         has_cartopy = True
-        # Center projection on data to handle near-antimeridian regions (e.g. NZ)
+        # Center projection on data to handle near-antimeridian regions (NZ)
         proj = ccrs.PlateCarree(central_longitude=central_lon)
-        data_crs = ccrs.PlateCarree()  # Data is always in standard geographic coordinates
-        # Extent in standard geographic coordinates (passed with explicit crs)
-        extent = [lon_min, lon_max, lat_min, lat_max]
+        data_crs = ccrs.PlateCarree()
     except ImportError:
         has_cartopy = False
         proj = None
         data_crs = None
-        extent = [lon_min, lon_max, lat_min, lat_max]
 
-    # Region boundary
     region_border = None
     if "shape_coords" in forecast_config:
         try:
             rc = forecast_config["shape_coords"]
-            if isinstance(rc, str) and os.path.exists(rc) and rc.endswith('.npy'):
+            if isinstance(rc, str) and os.path.exists(rc) and rc.endswith(".npy"):
                 region_border = np.load(rc)
             elif isinstance(rc, np.ndarray):
                 region_border = rc
@@ -2453,148 +2504,129 @@ def plot_csep_6panel(simulations: pd.DataFrame, observed: pd.DataFrame,
         except Exception:
             pass
 
-    # Helper for map setup
     def setup_map(ax):
         if has_cartopy:
-             ax.add_feature(cfeature.LAND, facecolor='#F0F0F0', alpha=0.7)
-             ax.add_feature(cfeature.OCEAN, facecolor='#E8F4FD', alpha=0.4)
-             ax.add_feature(cfeature.COASTLINE, linewidth=1.0, color='#4A5568')
-             ax.add_feature(cfeature.BORDERS, linestyle=':', linewidth=0.5, color='#A0AEC0')
-             try:
-                 gl = ax.gridlines(draw_labels=True, linewidth=0.4, color='#CBD5E0', alpha=0.4, linestyle='--')
-                 gl.top_labels = False
-                 gl.right_labels = False
-             except: pass
+            ax.set_extent(extent, crs=data_crs)
+            ax.add_feature(cfeature.OCEAN, facecolor=_OCEAN, zorder=0)
+            ax.add_feature(cfeature.LAND, facecolor=_LAND, zorder=1)
+            # Above the density mesh (zorder 3) so the coastline stays visible
+            ax.add_feature(cfeature.COASTLINE, linewidth=0.9, color=_COAST, zorder=4)
+            try:
+                gl = ax.gridlines(draw_labels=True, linewidth=0.35, color="#B8C4D0",
+                                  alpha=0.6, linestyle=":")
+                gl.top_labels = False
+                gl.right_labels = False
+                gl.xlocator = mticker.FixedLocator(np.arange(160, 186, 4))
+                gl.ylocator = mticker.FixedLocator(np.arange(-52, -28, 4))
+                gl.xlabel_style = {"size": 8.5, "color": _TEXT}
+                gl.ylabel_style = {"size": 8.5, "color": _TEXT}
+            except Exception:
+                pass
         else:
-             ax.set_facecolor('#FAFAFA')
-             ax.grid(True, linestyle="--", alpha=0.3, color='gray')
-             ax.set_aspect('equal')
-             ax.set_xlim(extent[0], extent[1])
-             ax.set_ylim(extent[2], extent[3])
-             ax.set_xlabel("Longitude")
-             ax.set_ylabel("Latitude")
-             for spine in ax.spines.values():
-                 spine.set_linewidth(1.0)
-                 spine.set_color('#CBD5E0')
-        
-        # Plot region border
+            ax.set_facecolor("#FAFBFC")
+            ax.grid(True, linestyle=":", alpha=0.4, color="#B8C4D0")
+            ax.set_aspect("equal")
+            ax.set_xlim(extent[0], extent[1])
+            ax.set_ylim(extent[2], extent[3])
+            ax.set_xlabel("Longitude", fontsize=10, color=_TEXT)
+            ax.set_ylabel("Latitude", fontsize=10, color=_TEXT)
+            ax.tick_params(labelsize=8.5, colors=_TEXT)
+            for spine in ax.spines.values():
+                spine.set_linewidth(0.8)
+                spine.set_color(_GRID)
         if region_border is not None:
             poly_closed = np.vstack([region_border, region_border[0]])
+            kwargs = dict(color=_REGION, linewidth=1.3, linestyle="--", zorder=6)
             if has_cartopy:
-                ax.plot(poly_closed[:, 1], poly_closed[:, 0], '-', color='#2D3748',
-                        linewidth=1.8, label='Region', transform=data_crs)
+                ax.plot(poly_closed[:, 1], poly_closed[:, 0], transform=data_crs, **kwargs)
             else:
-                ax.plot(poly_closed[:, 1], poly_closed[:, 0], '-', color='#2D3748',
-                        linewidth=1.8, label='Region')
+                ax.plot(poly_closed[:, 1], poly_closed[:, 0], **kwargs)
 
-    # Panel 4: Combined Spatial Distribution
-    try:
+    def _add_map_axes(slot):
         if has_cartopy:
-            ax4 = fig.add_subplot(gs[2, 1], projection=proj)
-        else:
-            raise ImportError("Manual Fallback")
-    except Exception as e:
-        print(f"Comparison map fallback due to: {e}")
-        has_cartopy = False
-        ax4 = fig.add_subplot(gs[2, 1])
-        ax4.set_xlim(extent[0], extent[1])
-        ax4.set_ylim(extent[2], extent[3])
-    
+            return fig.add_subplot(slot, projection=proj)
+        return fig.add_subplot(slot)
+
+    scatter_kwargs = {"transform": data_crs} if has_cartopy else {}
+
+    sample_sim = simulations.sample(n=min(5000, len(simulations)), random_state=42)
+    sim_sizes = np.clip(2 * (10 ** (sample_sim["magnitude"] - mc)), 2, 80)
+    obs_sizes = np.clip(5 * (10 ** (observed["magnitude"] - mc)), 12, 260)
+
+    # ── Panel (d): forecast vs observed overlay ────────────────────────
+    ax4 = _add_map_axes(gs[2, 0])
     setup_map(ax4)
-    if has_cartopy:
-        ax4.set_extent(extent, crs=data_crs)
+    _map_title(ax4, "(d)  Forecast vs observed epicentres")
+    ax4.scatter(sample_sim["longitude"], sample_sim["latitude"], s=sim_sizes,
+                alpha=0.18, color=_SIM_CLR, edgecolors="none", zorder=3,
+                **scatter_kwargs)
+    if obs_count > 0:
+        ax4.scatter(observed["longitude"], observed["latitude"], s=obs_sizes,
+                    alpha=0.9, color=_OBS_CLR, edgecolors="white", linewidth=0.7,
+                    zorder=5, **scatter_kwargs)
+    ax4.legend(handles=[
+        Line2D([], [], marker="o", ls="", mfc=_SIM_CLR, mec="none", alpha=0.6,
+               ms=6, label="Forecast sample"),
+        Line2D([], [], marker="o", ls="", mfc=_OBS_CLR, mec="white", ms=7,
+               label=f"Observed ({obs_count})"),
+        Line2D([], [], ls="--", color=_REGION, lw=1.3, label="Model region"),
+    ], loc="lower left", fontsize=8.5, frameon=True, framealpha=0.95,
+       edgecolor=_GRID)
 
-    sample_sim = simulations.sample(n=min(5000, len(simulations)))
-    sim_sizes = 2 * (10 ** (sample_sim["magnitude"] - mc))
-    sim_sizes = np.clip(sim_sizes, 2, 100)
-    
-    if has_cartopy:
-        ax4.scatter(sample_sim["longitude"], sample_sim["latitude"], s=sim_sizes, alpha=0.15,
-                    color=_SIM_CLR, label="Forecast sample", transform=data_crs, zorder=3)
-    else:
-        ax4.scatter(sample_sim["longitude"], sample_sim["latitude"], s=sim_sizes, alpha=0.15,
-                    color=_SIM_CLR, label="Forecast sample")
-
-    obs_sizes = 5 * (10 ** (observed["magnitude"] - mc))
-    obs_sizes = np.clip(obs_sizes, 10, 300)
-
-    if has_cartopy:
-        ax4.scatter(observed["longitude"], observed["latitude"], s=obs_sizes, alpha=0.9,
-                    color=_OBS_CLR, edgecolors='white', linewidth=0.8,
-                    label=f"Observed ({obs_count})", transform=data_crs, zorder=5)
-    else:
-        ax4.scatter(observed["longitude"], observed["latitude"], s=obs_sizes, alpha=0.9,
-                    color=_OBS_CLR, edgecolors='white', linewidth=0.8,
-                    label=f"Observed ({obs_count})")
-    
-    ax4.set_title("Combined Spatial Distribution", fontsize=12, fontweight="bold",
-                  color=_NAVY, pad=8)
-    ax4.legend(loc='lower left', fontsize=8, frameon=True, framealpha=0.95,
-               edgecolor=_GRID)
-
-    # Panel 5: Forecast Distribution
-    if has_cartopy:
-        ax5 = fig.add_subplot(gs[3, 0], projection=proj)
-    else:
-        ax5 = fig.add_subplot(gs[3, 0])
-        
+    # ── Panel (e): forecast spatial density ────────────────────────────
+    ax5 = _add_map_axes(gs[2, 1])
     setup_map(ax5)
-    if has_cartopy:
-        ax5.set_extent(extent, crs=data_crs)
-    
-    if has_cartopy:
-        sc5 = ax5.scatter(sample_sim["longitude"], sample_sim["latitude"],
-                          c=sample_sim["magnitude"], cmap='YlGnBu', s=sim_sizes, alpha=0.5,
-                          edgecolors='none', linewidth=0.3,
-                          transform=data_crs, zorder=3)
-    else:
-        sc5 = ax5.scatter(sample_sim["longitude"], sample_sim["latitude"],
-                          c=sample_sim["magnitude"], cmap='YlGnBu', s=sim_sizes, alpha=0.5,
-                          edgecolors='none', linewidth=0.3)
-    cb5 = plt.colorbar(sc5, ax=ax5, label="Magnitude", shrink=0.75, pad=0.02)
-    cb5.ax.tick_params(labelsize=8)
-    
-    n_sims = simulations['catalog_id'].nunique()
-    mean_events = sim_counts.mean()
-    ax5.text(0.02, 0.98, f"N sims: {n_sims}\nMean: {mean_events:.0f} events", 
-             transform=ax5.transAxes, ha='left', va='top', fontsize=9,
-             bbox=dict(boxstyle='round,pad=0.3', facecolor='white', edgecolor=_GRID, alpha=0.9))
-    
-    ax5.set_title("Forecast Distribution (sample)", fontsize=12, fontweight="bold",
-                  color=_NAVY, pad=8)
+    _map_title(ax5, "(e)  Forecast spatial density")
+    cell = 0.2
+    lon_edges = np.arange(lon_min, lon_max + cell, cell)
+    lat_edges = np.arange(lat_min, lat_max + cell, cell)
+    H, _, _ = np.histogram2d(simulations["longitude"], simulations["latitude"],
+                             bins=[lon_edges, lat_edges])
+    rate = H / n_sims_val
+    rate_masked = np.ma.masked_where(rate <= 0, rate)
+    if rate_masked.count() > 0:
+        # Clamp vmin above the single-event-in-one-catalog level so sampling
+        # noise renders as the palest colour instead of dark speckle.
+        vmin = max(2.0 / n_sims_val, rate[rate > 0].min())
+        pcm = ax5.pcolormesh(
+            lon_edges, lat_edges, rate_masked.T, cmap="YlGnBu",
+            norm=LogNorm(vmin=vmin, vmax=rate.max()),
+            zorder=3, **scatter_kwargs)
+        cb5 = plt.colorbar(pcm, ax=ax5, shrink=0.82, pad=0.02, aspect=26)
+        cb5.set_label(f"Mean events per catalog ({cell}° cell)", fontsize=9.5, color=_TEXT)
+        cb5.ax.tick_params(labelsize=8.5, colors=_TEXT)
+        cb5.outline.set_edgecolor(_GRID)
+    ax5.text(0.03, 0.97,
+             f"{n_sims_val} catalogs\nmean {sim_counts.mean():.0f} events",
+             transform=ax5.transAxes, ha="left", va="top", fontsize=9, color=_TEXT,
+             bbox=dict(boxstyle="round,pad=0.35", facecolor="white",
+                       edgecolor=_GRID, alpha=0.92))
 
-    # Panel 6: Observed Distribution
-    if has_cartopy:
-        ax6 = fig.add_subplot(gs[3, 1], projection=proj)
-    else:
-        ax6 = fig.add_subplot(gs[3, 1])
-    
+    # ── Panel (f): observed epicentres ─────────────────────────────────
+    ax6 = _add_map_axes(gs[2, 2])
     setup_map(ax6)
-    if has_cartopy:
-        ax6.set_extent(extent, crs=data_crs)
-        
-    if has_cartopy:
+    _map_title(ax6, f"(f)  Observed epicentres ({obs_count} events)")
+    if obs_count > 0:
         sc6 = ax6.scatter(observed["longitude"], observed["latitude"],
-                          c=observed["magnitude"], cmap='YlOrRd', s=obs_sizes,
-                          alpha=0.85, edgecolors='white', linewidth=0.8,
-                          transform=data_crs, zorder=5)
+                          c=observed["magnitude"], cmap="YlOrRd", s=obs_sizes,
+                          alpha=0.9, edgecolors="#7A7A7A", linewidth=0.5,
+                          zorder=5, **scatter_kwargs)
+        cb6 = plt.colorbar(sc6, ax=ax6, shrink=0.82, pad=0.02, aspect=26)
+        cb6.set_label("Magnitude", fontsize=9.5, color=_TEXT)
+        cb6.ax.tick_params(labelsize=8.5, colors=_TEXT)
+        cb6.outline.set_edgecolor(_GRID)
+        ax6.text(0.03, 0.97,
+                 f"max M {obs_max_mag:.1f}\nmean M {observed['magnitude'].mean():.1f}",
+                 transform=ax6.transAxes, ha="left", va="top", fontsize=9, color=_TEXT,
+                 bbox=dict(boxstyle="round,pad=0.35", facecolor="white",
+                           edgecolor=_GRID, alpha=0.92))
     else:
-        sc6 = ax6.scatter(observed["longitude"], observed["latitude"],
-                          c=observed["magnitude"], cmap='YlOrRd', s=obs_sizes,
-                          alpha=0.85, edgecolors='white', linewidth=0.8)
-    cb6 = plt.colorbar(sc6, ax=ax6, label="Magnitude", shrink=0.75, pad=0.02)
-    cb6.ax.tick_params(labelsize=8)
-    
-    ax6.text(0.02, 0.98, f"Max M: {obs_max_mag:.1f}\nMean M: {observed['magnitude'].mean():.1f}", 
-             transform=ax6.transAxes, ha='left', va='top', fontsize=9,
-             bbox=dict(boxstyle='round,pad=0.3', facecolor='white', edgecolor=_GRID, alpha=0.9))
-    
-    ax6.set_title(f"Observed Distribution ({obs_count} events)", fontsize=12,
-                  fontweight="bold", color=_NAVY, pad=8)
-    
+        ax6.text(0.5, 0.5, "No observed events", transform=ax6.transAxes,
+                 ha="center", va="center", fontsize=12, color=_SUB)
+
     if output_path:
-        plt.savefig(output_path, dpi=300, bbox_inches='tight', facecolor=_BG)
+        plt.savefig(output_path, dpi=250, bbox_inches="tight", facecolor=_BG)
         print(f"6-Panel Plot saved to: {output_path}")
-        
+
     plt.close(fig)
     return fig

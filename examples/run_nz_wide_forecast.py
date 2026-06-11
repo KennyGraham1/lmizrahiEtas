@@ -21,9 +21,12 @@ import argparse
 import datetime as dt
 import json
 import logging
+import multiprocessing
 import os
+import shutil
 import sys
 import warnings
+from concurrent.futures import ProcessPoolExecutor
 
 import matplotlib
 
@@ -117,6 +120,17 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=DEFAULT_N_SIMULATIONS,
         help=f"Number of synthetic catalogs per duration. Default: {DEFAULT_N_SIMULATIONS}",
+    )
+    parser.add_argument(
+        "--simulation-workers",
+        type=int,
+        default=0,
+        help=(
+            "Worker processes simulating catalogs in parallel. Each worker "
+            "writes a disjoint catalog_id range to a part file, merged into "
+            "the usual forecasts_<duration>days.csv afterwards. "
+            "0 picks a RAM- and CPU-aware default; 1 disables parallelism."
+        ),
     )
     parser.add_argument(
         "--experiment-name",
@@ -554,6 +568,119 @@ def guard_against_degenerate_inversion(
     return info
 
 
+def resolve_simulation_workers(requested: int, n_simulations: int) -> int:
+    if requested == 0:
+        try:
+            import psutil
+
+            ram_workers = int(psutil.virtual_memory().available / (2.0 * 1024**3))
+        except ImportError:
+            ram_workers = 10
+        requested = min(12, max(1, ram_workers), os.cpu_count() or 1)
+    # Each worker must simulate at least 2 catalogs: ETASSimulation.simulate
+    # omits the catalog_id column when its end index is 1, which would make
+    # the first part file unmergeable.
+    return max(1, min(requested, n_simulations // 2))
+
+
+# Cached per worker process so consecutive part tasks (one per forecast
+# duration) skip re-reading the catalog and source/target CSVs.
+_WORKER_CALCULATION = None
+_WORKER_CALCULATION_KEY = None
+
+
+def _simulate_part(task: dict) -> str:
+    global _WORKER_CALCULATION, _WORKER_CALCULATION_KEY
+
+    # Simulation kernels operate on tiny per-catalog arrays; numba's default
+    # thread fan-out costs more than it buys and oversubscribes the machine
+    # when many workers run at once.
+    import numba
+
+    numba.set_num_threads(1)
+
+    if _WORKER_CALCULATION_KEY != task["parameter_path"]:
+        with open(task["parameter_path"], "r") as f:
+            inversion_output = json.load(f)
+        inversion_output["fn_catalog"] = task["fn_catalog"]
+        inversion_output["shape_coords"] = task["shape_coords"]
+        _WORKER_CALCULATION = ETASParameterCalculation.load_calculation(inversion_output)
+        _WORKER_CALCULATION_KEY = task["parameter_path"]
+
+    simulation = ETASSimulation(
+        _WORKER_CALCULATION,
+        m_max=task["m_max"],
+        approx_times=True,
+        induced_info=task["induced_info"],
+    )
+    simulation.prepare()
+
+    part_path = task["part_path"]
+    # simulate_to_csv()'s resume logic compares the stored catalog_id against
+    # the local simulation count, which is wrong for i_start > 0; a leftover
+    # part from an interrupted run must be regenerated, not resumed.
+    if os.path.exists(part_path):
+        os.remove(part_path)
+    simulation.simulate_to_csv(
+        part_path,
+        task["duration"],
+        task["n_simulations"],
+        m_threshold=task["m_threshold"],
+        i_start=task["i_start"],
+    )
+    return part_path
+
+
+def _run_parallel_simulation(
+    executor: ProcessPoolExecutor,
+    workers: int,
+    parameter_path: str,
+    fn_catalog: str,
+    shape_coords: str,
+    m_max: float | None,
+    induced_info: list | None,
+    simulation_path: str,
+    duration: int,
+    n_simulations: int,
+    m_threshold: float,
+) -> None:
+    base, remainder = divmod(n_simulations, workers)
+    tasks = []
+    i_start = 0
+    for worker_index in range(workers):
+        count = base + (1 if worker_index < remainder else 0)
+        if count == 0:
+            continue
+        tasks.append(
+            {
+                "parameter_path": parameter_path,
+                "fn_catalog": fn_catalog,
+                "shape_coords": shape_coords,
+                "m_max": m_max,
+                "induced_info": induced_info,
+                "duration": duration,
+                "n_simulations": count,
+                "i_start": i_start,
+                "m_threshold": m_threshold,
+                "part_path": f"{simulation_path}.part{worker_index:03d}",
+            }
+        )
+        i_start += count
+
+    # executor.map preserves task order, so parts merge in ascending
+    # catalog_id order, matching the layout of a serially written file.
+    part_paths = list(executor.map(_simulate_part, tasks))
+
+    with open(simulation_path, "w") as merged:
+        for k, part_path in enumerate(part_paths):
+            with open(part_path, "r") as part:
+                if k > 0:
+                    next(part, None)
+                shutil.copyfileobj(part, merged)
+    for part_path in part_paths:
+        os.remove(part_path)
+
+
 def run_simulations(
     calculation: ETASParameterCalculation,
     durations: list[int],
@@ -563,41 +690,78 @@ def run_simulations(
     simulation_dir: str,
     background_grid: pd.DataFrame | None = None,
     overwrite: bool = False,
+    simulation_workers: int = 1,
+    parameter_path: str | None = None,
+    fn_catalog: str | None = None,
+    shape_coords: str | None = None,
 ) -> dict[int, str]:
     simulation_paths = {}
-    for duration in durations:
-        induced_info = build_background_induced_info(
-            calculation,
-            background_grid,
-            duration,
+    workers = max(1, simulation_workers) if parameter_path is not None else 1
+    executor = None
+    if workers > 1:
+        os.makedirs(simulation_dir, exist_ok=True)
+        # Spawn (not fork): the parent has already run numba parallel kernels
+        # during the inversion, and forking a process with live threading
+        # runtimes is unsafe.
+        executor = ProcessPoolExecutor(
+            max_workers=workers,
+            mp_context=multiprocessing.get_context("spawn"),
         )
-        simulation = ETASSimulation(
-            calculation,
-            m_max=m_max,
-            approx_times=True,
-            induced_info=induced_info,
-        )
-        simulation.prepare()
-        simulation_path = os.path.join(simulation_dir, f"forecasts_{duration}days.csv")
-        # simulate_to_csv() resumes/skips when the file already exists, so a
-        # stale forecast from a previous (e.g. degenerate) inversion would be
-        # silently reused. Remove it first when the caller asks to overwrite.
-        if overwrite and os.path.exists(simulation_path):
-            logger.info("Removing stale forecast file %s before re-simulating", simulation_path)
-            os.remove(simulation_path)
-        logger.info(
-            "Simulating %s NZ-wide catalogs for %s days into %s",
-            n_simulations,
-            duration,
-            simulation_path,
-        )
-        simulation.simulate_to_csv(
-            simulation_path,
-            duration,
-            n_simulations,
-            m_threshold=mc,
-        )
-        simulation_paths[duration] = simulation_path
+        logger.info("Simulating with %s parallel workers", workers)
+    try:
+        for duration in durations:
+            induced_info = build_background_induced_info(
+                calculation,
+                background_grid,
+                duration,
+            )
+            simulation_path = os.path.join(simulation_dir, f"forecasts_{duration}days.csv")
+            # simulate_to_csv() resumes/skips when the file already exists, so a
+            # stale forecast from a previous (e.g. degenerate) inversion would be
+            # silently reused. Remove it first when the caller asks to overwrite.
+            if overwrite and os.path.exists(simulation_path):
+                logger.info("Removing stale forecast file %s before re-simulating", simulation_path)
+                os.remove(simulation_path)
+            logger.info(
+                "Simulating %s NZ-wide catalogs for %s days into %s",
+                n_simulations,
+                duration,
+                simulation_path,
+            )
+            if executor is not None and not os.path.exists(simulation_path):
+                _run_parallel_simulation(
+                    executor,
+                    workers,
+                    parameter_path,
+                    fn_catalog,
+                    shape_coords,
+                    m_max,
+                    induced_info,
+                    simulation_path,
+                    duration,
+                    n_simulations,
+                    mc,
+                )
+            else:
+                # Serial path; also resumes a partially written existing file,
+                # which the part-file scheme cannot do.
+                simulation = ETASSimulation(
+                    calculation,
+                    m_max=m_max,
+                    approx_times=True,
+                    induced_info=induced_info,
+                )
+                simulation.prepare()
+                simulation.simulate_to_csv(
+                    simulation_path,
+                    duration,
+                    n_simulations,
+                    m_threshold=mc,
+                )
+            simulation_paths[duration] = simulation_path
+    finally:
+        if executor is not None:
+            executor.shutdown()
     return simulation_paths
 
 
@@ -905,6 +1069,12 @@ def main() -> None:
         output_paths["simulation_dir"],
         background_grid=background_grid,
         overwrite=args.force_resimulate or args.force_reinvert,
+        simulation_workers=resolve_simulation_workers(
+            args.simulation_workers, args.n_simulations
+        ),
+        parameter_path=parameter_path,
+        fn_catalog=config["fn_catalog"],
+        shape_coords=config["shape_coords"],
     )
     observed_windows, observed_paths = build_observed_windows(
         catalog,

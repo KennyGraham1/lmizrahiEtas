@@ -21,6 +21,8 @@ import logging
 import os
 import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -180,6 +182,30 @@ def parse_args() -> argparse.Namespace:
         "--continue-on-error",
         action="store_true",
         help="Continue the sweep if one scenario fails.",
+    )
+    parser.add_argument(
+        "--max-parallel-scenarios",
+        type=int,
+        default=0,
+        help=(
+            "Run up to this many scenarios concurrently as subprocesses. "
+            "0 picks a CPU-aware default; 1 restores serial execution. "
+            "When parallel, each child gets a proportional share of the "
+            "machine's threads (NUMBA/OMP/BLAS env caps) and its output is "
+            "written to logs/<scenario>.log inside the batch output "
+            "directory. On failure without --continue-on-error, queued "
+            "scenarios are cancelled but already-running ones finish first."
+        ),
+    )
+    parser.add_argument(
+        "--simulation-workers",
+        type=int,
+        default=0,
+        help=(
+            "Per-scenario simulation worker processes forwarded to the "
+            "forecast runner. 0 derives a default from the CPU count and "
+            "the number of concurrently running scenarios."
+        ),
     )
     parser.add_argument(
         "--allow-degenerate-inversion",
@@ -368,11 +394,75 @@ def metadata_matches_request(
     requested_max_mag = args.pycsep_max_mag
     stored_max_mag = pycsep.get("max_mag")
     if requested_max_mag is None:
-        if stored_max_mag is None:
+        if stored_max_mag is not None:
             return False
-    elif float(stored_max_mag) != float(requested_max_mag):
+    elif stored_max_mag is None or float(stored_max_mag) != float(requested_max_mag):
         return False
     return True
+
+
+def resolve_max_parallel_scenarios(requested: int, n_scenarios: int) -> int:
+    if requested == 0:
+        # Each scenario averages ~6 busy cores (GIL-bound pandas with short
+        # numba bursts), so one scenario per ~8 cores keeps the box loaded
+        # without oversubscribing.
+        requested = max(1, (os.cpu_count() or 1) // 8)
+    return max(1, min(requested, n_scenarios))
+
+
+def resolve_child_simulation_workers(requested: int, max_parallel: int) -> int:
+    if requested:
+        return max(1, requested)
+    return max(1, min(12, (os.cpu_count() or 1) // max_parallel))
+
+
+def build_child_env(max_parallel: int) -> dict[str, str]:
+    threads = str(max(1, (os.cpu_count() or 1) // max_parallel))
+    env = os.environ.copy()
+    for var in (
+        "NUMBA_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "MKL_NUM_THREADS",
+    ):
+        env[var] = threads
+    return env
+
+
+def warm_numba_cache(logger: logging.Logger) -> None:
+    """
+    Compile the numba inversion kernels once before launching scenario
+    subprocesses. Concurrent children compiling the same stale cache entries
+    have crashed with SIGKILL before (see run_parallel_simulations.py).
+    """
+    try:
+        if ROOT_DIR not in sys.path:
+            sys.path.insert(0, ROOT_DIR)
+        from etas.inversion import (
+            _neg_log_likelihood_core,
+            _triggering_kernel_core,
+        )
+
+        dummy = np.ones(10, dtype=np.float64)
+        _triggering_kernel_core(
+            dummy, dummy, dummy, dummy, False,
+            1.0, 1.0, 0.01, 0.1, 100.0, 0.1, 0.3, 0.8, 3.0,
+        )
+        _neg_log_likelihood_core(
+            dummy, dummy, dummy, dummy, dummy,
+            1.0, 1.0, 1.0, -2.0, 0.1, 3.0, -2.0, 0.3, 0.8, 3.0,
+        )
+        logger.info("Numba inversion kernels warmed before scenario fan-out.")
+    except Exception as exc:  # pragma: no cover - best effort safeguard
+        logger.warning("Could not warm numba cache (non-fatal): %s", exc)
+
+
+def tail_of_file(path: str, n_lines: int = 15) -> str:
+    try:
+        with open(path, "r") as f:
+            return "".join(f.readlines()[-n_lines:])
+    except OSError:
+        return "<log unavailable>"
 
 
 def run_scenario(
@@ -380,6 +470,9 @@ def run_scenario(
     args: argparse.Namespace,
     forecast_start: dt.datetime,
     logger: logging.Logger,
+    log_path: str | None = None,
+    child_env: dict[str, str] | None = None,
+    simulation_workers: int = 0,
 ) -> tuple[str, str]:
     experiment_name = f"{args.batch_name}_{scenario.name}"
     metadata_path = scenario_metadata_path(experiment_name, forecast_start)
@@ -439,10 +532,31 @@ def run_scenario(
         command.append("--allow-degenerate-inversion")
     if needs_forced_reinvert:
         command.append("--force-reinvert")
+    if simulation_workers:
+        command.extend(["--simulation-workers", str(simulation_workers)])
 
     logger.info("Running scenario '%s'", scenario.name)
     logger.info("Command: %s", " ".join(command))
-    subprocess.run(command, check=True, cwd=BASE_DIR)
+    if log_path is None:
+        subprocess.run(command, check=True, cwd=BASE_DIR, env=child_env)
+    else:
+        logger.info("Scenario '%s' output -> %s", scenario.name, log_path)
+        with open(log_path, "w") as log_file:
+            try:
+                subprocess.run(
+                    command,
+                    check=True,
+                    cwd=BASE_DIR,
+                    env=child_env,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                )
+            except subprocess.CalledProcessError as exc:
+                raise RuntimeError(
+                    f"Scenario '{scenario.name}' exited with code "
+                    f"{exc.returncode}; tail of {log_path}:\n"
+                    f"{tail_of_file(log_path)}"
+                ) from exc
     return experiment_name, metadata_path
 
 
@@ -486,6 +600,11 @@ def safe_log_ratio(value: float) -> float:
     return abs(float(np.log(clipped)))
 
 
+# The standalone pyCSEP recovery runs matplotlib in-process; serialize it
+# when scenarios are collected from multiple threads.
+_PYCSEP_RECOVERY_LOCK = threading.Lock()
+
+
 def ensure_completed_pycsep_analysis(
     metadata_path: str,
     args: argparse.Namespace,
@@ -520,14 +639,15 @@ def ensure_completed_pycsep_analysis(
             f"stored error={stored_error!r}, import error={exc!r}"
         ) from exc
 
-    run_analysis_from_metadata(
-        metadata_path=metadata_path,
-        region_source=args.pycsep_region_source,
-        grid_spacing=args.pycsep_grid_spacing,
-        mag_bin=args.pycsep_mag_bin,
-        max_mag=args.pycsep_max_mag,
-        output_dir=None,
-    )
+    with _PYCSEP_RECOVERY_LOCK:
+        run_analysis_from_metadata(
+            metadata_path=metadata_path,
+            region_source=args.pycsep_region_source,
+            grid_spacing=args.pycsep_grid_spacing,
+            mag_bin=args.pycsep_mag_bin,
+            max_mag=args.pycsep_max_mag,
+            output_dir=None,
+        )
 
     with open(metadata_path, "r") as f:
         refreshed_metadata = json.load(f)
@@ -780,95 +900,77 @@ def plot_scorecard(
     horizon_df: pd.DataFrame,
     output_path: str,
 ) -> None:
-    """Generate a publication-quality calibration scorecard figure."""
-    from matplotlib.gridspec import GridSpec
-    from matplotlib.patches import FancyBboxPatch
-    from matplotlib.colors import Normalize
+    """Generate a compact, publication-quality calibration scorecard."""
+    from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
+    from matplotlib.lines import Line2D
     import matplotlib.patheffects as pe
 
-    # ── Design tokens ──────────────────────────────────────────────────
     _DEEP_NAVY = "#0D1B2A"
-    _SLATE = "#1B2838"
-    _TEAL = "#1B9AAA"
-    _CORAL = "#E8505B"
-    _AMBER = "#F2A65A"
-    _EMERALD = "#2ECC71"
-    _MUTED = "#8D99AE"
-    _LIGHT_BG = "#F7F9FC"
+    _TEAL = "#2A9D8F"
+    _CORAL = "#D95D39"
+    _MUTED = "#64748B"
+    _LIGHT_BG = "#F5F7FA"
     _PANEL_BG = "#FFFFFF"
-    _GRID_CLR = "#E2E8F0"
-    _TEXT_CLR = "#2D3748"
-    _SUBTEXT = "#718096"
-
-    _CONSISTENCY_PALETTE = {
-        "N": "#3B82F6",  # Blue
-        "M": "#F59E0B",  # Amber
-        "S": "#10B981",  # Green
-        "PL": "#EF4444",  # Red
-    }
-    _HORIZON_PALETTE = ["#3B82F6", "#06B6D4", "#8B5CF6"]
+    _GRID_CLR = "#DDE3EA"
+    _TEXT_CLR = "#243447"
+    _SUBTEXT = "#66788A"
 
     ordered = comparison_df.sort_values("calibration_score").reset_index(drop=True)
     scenario_names = ordered["scenario_name"].tolist()
+    display_names = [name.replace("_", " ") for name in scenario_names]
     n_scenarios = len(ordered)
+    y = np.arange(n_scenarios)
 
-    # ── Figure layout ──────────────────────────────────────────────────
-    fig = plt.figure(figsize=(22, 14), facecolor=_LIGHT_BG)
-    gs = GridSpec(
-        3, 3,
-        figure=fig,
-        height_ratios=[0.12, 1, 1],
-        hspace=0.35,
-        wspace=0.32,
-        left=0.06,
+    fig = plt.figure(figsize=(18, 11), facecolor=_LIGHT_BG)
+    gs = fig.add_gridspec(
+        2,
+        3,
+        left=0.07,
         right=0.96,
-        top=0.95,
-        bottom=0.06,
+        top=0.88,
+        bottom=0.08,
+        hspace=0.42,
+        wspace=0.34,
     )
-
-    # ── Row 0: Context banner ──────────────────────────────────────────
-    ax_banner = fig.add_subplot(gs[0, :])
-    ax_banner.set_xlim(0, 1)
-    ax_banner.set_ylim(0, 1)
-    ax_banner.axis("off")
-
-    # Title
-    ax_banner.text(
-        0.5, 0.82,
+    fig.suptitle(
         "NZ-Wide ETAS Calibration Scorecard",
-        ha="center", va="top",
-        fontsize=20, fontweight="bold", color=_DEEP_NAVY,
-        fontfamily="sans-serif",
+        x=0.07,
+        y=0.965,
+        ha="left",
+        fontsize=23,
+        fontweight="bold",
+        color=_DEEP_NAVY,
+    )
+    fig.text(
+        0.07,
+        0.925,
+        (
+            f"{n_scenarios} scenarios across completeness thresholds, training "
+            "windows, and parameter initializations | lower score is better"
+        ),
+        ha="left",
+        fontsize=11,
+        color=_SUBTEXT,
+    )
+    fig.add_artist(
+        Line2D(
+            [0.07, 0.96],
+            [0.905, 0.905],
+            transform=fig.transFigure,
+            color=_GRID_CLR,
+            linewidth=1.2,
+        )
     )
 
-    # Metadata line
-    best = ordered.iloc[0]
-    mc_val = best.get("mc", 4.1) if "mc" in ordered.columns else 4.1
-    tw_start = best.get("timewindow_start", "1960") if "timewindow_start" in ordered.columns else "1960"
-    tw_start_short = str(tw_start)[:4] if tw_start else "?"
-    meta_parts = [
-        f"Catalog: GeoNet NZ  (M$_c$ = {mc_val})",
-        f"Training: {tw_start_short}–2018",
-        f"Region: 34°S–48°S, 164°E–180°E",
-        f"Scenarios: {n_scenarios}",
-    ]
-    ax_banner.text(
-        0.5, 0.25,
-        "  ·  ".join(meta_parts),
-        ha="center", va="center",
-        fontsize=11, color=_SUBTEXT,
-        fontfamily="sans-serif",
-    )
-
-    # Thin separator
-    ax_banner.axhline(0.0, color=_GRID_CLR, linewidth=1.5)
-
-    # ── Helper: Style an axis ──────────────────────────────────────────
-    def _style_ax(ax, title, xlabel="", ylabel=""):
+    def _style_ax(ax, title, xlabel="", ylabel="", grid_axis="both"):
         ax.set_facecolor(_PANEL_BG)
         ax.set_title(
-            title, fontsize=13, fontweight="bold", color=_DEEP_NAVY,
-            pad=10, loc="left",
+            title,
+            fontsize=13,
+            fontweight="bold",
+            color=_DEEP_NAVY,
+            pad=12,
+            loc="left",
         )
         if xlabel:
             ax.set_xlabel(xlabel, fontsize=10, color=_TEXT_CLR)
@@ -878,213 +980,302 @@ def plot_scorecard(
             spine.set_color(_GRID_CLR)
             spine.set_linewidth(0.8)
         ax.tick_params(colors=_TEXT_CLR, labelsize=9)
-        ax.grid(True, alpha=0.35, color=_GRID_CLR, linewidth=0.6)
+        ax.grid(
+            True,
+            axis=grid_axis,
+            alpha=0.55,
+            color=_GRID_CLR,
+            linewidth=0.7,
+        )
 
-    # ── Panel 1: Calibration Score ─────────────────────────────────────
-    ax_score = fig.add_subplot(gs[1, 0])
-    _style_ax(ax_score, "Calibration Score", xlabel="Score  (lower is better)")
-
-    y = np.arange(n_scenarios)
+    # Calibration score
+    ax_score = fig.add_subplot(gs[0, 0])
+    _style_ax(ax_score, "Calibration score", xlabel="Composite score", grid_axis="x")
     scores = ordered["calibration_score"].values
-    norm = Normalize(vmin=scores.min() - 0.1, vmax=scores.max() + 0.5)
-
     bars = ax_score.barh(
-        y, scores,
+        y,
+        scores,
         height=0.6,
-        color=[plt.cm.RdYlGn_r(norm(s)) for s in scores],
-        edgecolor="white",
-        linewidth=1.2,
+        color=[_TEAL] + ["#AFC4D4"] * max(0, n_scenarios - 1),
+        edgecolor="none",
         zorder=3,
     )
-    # Value labels
     for i, (bar, s) in enumerate(zip(bars, scores)):
         ax_score.text(
-            s + scores.max() * 0.02, i,
+            s + scores.max() * 0.025,
+            i,
             f"{s:.2f}",
-            va="center", fontsize=10, fontweight="bold", color=_TEXT_CLR,
+            va="center",
+            fontsize=9,
+            fontweight="bold",
+            color=_TEXT_CLR,
         )
     ax_score.set_yticks(y)
-    ax_score.set_yticklabels(scenario_names, fontsize=10, fontweight="medium")
+    ax_score.set_yticklabels(display_names, fontsize=9)
     ax_score.invert_yaxis()
-    ax_score.set_xlim(0, scores.max() * 1.25)
-
-    # Best-scenario badge
-    ax_score.annotate(
-        "★ BEST",
-        xy=(scores[0], 0),
-        xytext=(-8, 0),
-        textcoords="offset points",
-        fontsize=8, fontweight="bold", color=_EMERALD,
-        ha="right", va="center",
+    ax_score.set_xlim(0, scores.max() * 1.22)
+    ax_score.text(
+        scores[0] * 0.96,
+        0,
+        "BEST",
+        ha="right",
+        va="center",
+        fontsize=8,
+        fontweight="bold",
+        color="white",
     )
 
-    # ── Panel 2: CSEP Consistency ──────────────────────────────────────
-    ax_consistency = fig.add_subplot(gs[1, 1])
-    _style_ax(ax_consistency, "CSEP Consistency Tests", ylabel="Fraction Passed")
-
-    x = np.arange(n_scenarios)
-    bar_width = 0.18
-    test_keys = [
-        ("n_consistency_fraction", "N"),
-        ("m_consistency_fraction", "M"),
-        ("s_consistency_fraction", "S"),
-        ("pl_consistency_fraction", "PL"),
+    # CSEP consistency matrix
+    ax_consistency = fig.add_subplot(gs[0, 1])
+    consistency_columns = [
+        "n_consistency_fraction",
+        "m_consistency_fraction",
+        "s_consistency_fraction",
+        "pl_consistency_fraction",
     ]
-
-    for offset, (col, label) in enumerate(test_keys):
-        vals = ordered[col].values
-        pos = x + (offset - 1.5) * bar_width
-        b = ax_consistency.bar(
-            pos, vals, width=bar_width,
-            color=_CONSISTENCY_PALETTE[label],
-            edgecolor="white", linewidth=0.8,
-            label=f"{label}-test", zorder=3,
-            alpha=0.88,
-        )
-        # Pass/fail symbols on top of bars
-        for xi, v in zip(pos, vals):
-            symbol = "✓" if v >= 0.5 else "✗"
-            clr = _EMERALD if v >= 0.5 else _CORAL
+    consistency = ordered[consistency_columns].to_numpy(dtype=float)
+    consistency_cmap = LinearSegmentedColormap.from_list(
+        "consistency",
+        ["#F8D7DA", "#F3E7B3", "#D6ECDD", "#78B892"],
+    )
+    ax_consistency.imshow(
+        consistency,
+        cmap=consistency_cmap,
+        vmin=0,
+        vmax=1,
+        aspect="auto",
+        interpolation="none",
+    )
+    ax_consistency.set_title(
+        "CSEP consistency",
+        fontsize=13,
+        fontweight="bold",
+        color=_DEEP_NAVY,
+        pad=12,
+        loc="left",
+    )
+    ax_consistency.set_xticks(np.arange(4))
+    ax_consistency.set_xticklabels(["N", "M", "S", "PL"], fontweight="bold")
+    ax_consistency.set_yticks(y)
+    ax_consistency.set_yticklabels(display_names, fontsize=9)
+    for i in range(n_scenarios):
+        for j in range(4):
+            value = consistency[i, j]
             ax_consistency.text(
-                xi, v + 0.03, symbol,
-                ha="center", va="bottom", fontsize=9, fontweight="bold",
-                color=clr,
+                j,
+                i,
+                f"{value:.0%}",
+                ha="center",
+                va="center",
+                fontsize=9,
+                fontweight="bold",
+                color=_DEEP_NAVY,
             )
-
-    ax_consistency.axhline(0.5, color=_CORAL, linestyle="--", linewidth=1, alpha=0.6, label="50% threshold")
-    ax_consistency.set_xticks(x)
-    ax_consistency.set_xticklabels(scenario_names, fontsize=10)
-    ax_consistency.set_ylim(0, 1.15)
-    ax_consistency.legend(
-        loc="upper right", frameon=True, framealpha=0.95,
-        edgecolor=_GRID_CLR, fontsize=8, ncol=3,
+    ax_consistency.set_xticks(np.arange(-0.5, 4, 1), minor=True)
+    ax_consistency.set_yticks(np.arange(-0.5, n_scenarios, 1), minor=True)
+    ax_consistency.grid(which="minor", color="white", linewidth=2)
+    ax_consistency.tick_params(which="minor", bottom=False, left=False)
+    ax_consistency.tick_params(colors=_TEXT_CLR, labelsize=9, length=0)
+    for spine in ax_consistency.spines.values():
+        spine.set_color(_GRID_CLR)
+    ax_consistency.text(
+        1.0,
+        -0.12,
+        "Cells at or above 50% pass the cross-horizon rule",
+        transform=ax_consistency.transAxes,
+        ha="right",
+        fontsize=8,
+        color=_SUBTEXT,
     )
 
-    # ── Panel 3: Obs / Sim Ratio ───────────────────────────────────────
-    ax_ratio = fig.add_subplot(gs[1, 2])
-    _style_ax(ax_ratio, "Obs / Sim Event Count Ratio", xlabel="Ratio  (1.0 = perfect)")
-
-    # Ideal range shading
-    ax_ratio.axvspan(0.5, 2.0, color=_EMERALD, alpha=0.06, zorder=1)
-    ax_ratio.axvspan(0.8, 1.25, color=_EMERALD, alpha=0.10, zorder=1)
-    ax_ratio.axvline(1.0, color=_MUTED, linestyle="--", linewidth=1.2, zorder=2)
-
-    ratios = ordered["mean_obs_to_sim_ratio"].values
+    # Mean observed / simulated count ratio
+    ax_ratio = fig.add_subplot(gs[0, 2])
+    _style_ax(
+        ax_ratio,
+        "Mean observed / simulated count",
+        xlabel="Ratio",
+        grid_axis="x",
+    )
+    ratios = ordered["mean_obs_to_sim_ratio"].to_numpy(dtype=float)
+    ax_ratio.axvspan(0.8, 1.25, color="#DCEFE6", zorder=0)
+    ax_ratio.axvline(1.0, color=_MUTED, linestyle="--", linewidth=1.2, zorder=1)
+    for i, ratio in enumerate(ratios):
+        ax_ratio.hlines(i, 1.0, ratio, color="#A9B8C6", linewidth=2, zorder=2)
     ax_ratio.scatter(
-        ratios, y,
-        s=120, c=[_EMERALD if 0.5 < r < 2.0 else _CORAL for r in ratios],
-        edgecolors=_DEEP_NAVY, linewidths=1.2, zorder=5,
+        ratios,
+        y,
+        s=72,
+        color=[_TEAL if 0.8 <= ratio <= 1.25 else _CORAL for ratio in ratios],
+        edgecolors="white",
+        linewidths=1.2,
+        zorder=3,
     )
-    for i, r in enumerate(ratios):
+    for i, ratio in enumerate(ratios):
         ax_ratio.text(
-            r + 0.02, i,
-            f"{r:.2f}",
-            va="center", fontsize=10, color=_TEXT_CLR, fontweight="medium",
+            ratio + 0.025,
+            i,
+            f"{ratio:.2f}",
+            va="center",
+            fontsize=9,
+            fontweight="bold",
+            color=_TEXT_CLR,
         )
     ax_ratio.set_yticks(y)
-    ax_ratio.set_yticklabels(scenario_names, fontsize=10)
+    ax_ratio.set_yticklabels(display_names, fontsize=9)
     ax_ratio.invert_yaxis()
-
-    # Add interpretation label
+    ratio_pad = max(0.08, (ratios.max() - ratios.min()) * 0.25)
+    ax_ratio.set_xlim(min(0.75, ratios.min() - ratio_pad), max(1.3, ratios.max() + ratio_pad))
     ax_ratio.text(
-        0.98, 0.02,
-        "< 1 = model over-predicts\n> 1 = model under-predicts",
-        transform=ax_ratio.transAxes, fontsize=8, color=_SUBTEXT,
-        ha="right", va="bottom",
-        bbox=dict(boxstyle="round,pad=0.4", facecolor=_LIGHT_BG, edgecolor=_GRID_CLR, alpha=0.9),
+        1.0,
+        -0.12,
+        "< 1 overpredicts | > 1 underpredicts",
+        transform=ax_ratio.transAxes,
+        ha="right",
+        fontsize=8,
+        color=_SUBTEXT,
     )
 
-    # ── Panel 4: Spatial Penalties ─────────────────────────────────────
-    ax_spatial = fig.add_subplot(gs[2, 0])
-    _style_ax(ax_spatial, "Spatial Allocation Diagnostics", ylabel="Percentage (%)")
-
+    # Spatial diagnostics: direct-value matrix avoids hiding the small metric.
+    ax_spatial = fig.add_subplot(gs[1, 0])
     empty_vals = 100 * ordered["mean_empty_cell_fraction"].values
     unsup_vals = 100 * ordered["mean_zero_rate_observed_fraction"].values
-
-    ax_spatial.bar(
-        x - 0.15, empty_vals, width=0.28,
-        color=_AMBER, edgecolor="white", linewidth=0.8,
-        label="Empty-cell forecast share", zorder=3,
-        alpha=0.85,
+    spatial_normalized = np.column_stack(
+        [
+            empty_vals / max(empty_vals.max(), 1),
+            unsup_vals / max(unsup_vals.max(), 1e-9),
+        ]
     )
-    ax_spatial.bar(
-        x + 0.15, unsup_vals, width=0.28,
-        color=_CORAL, edgecolor="white", linewidth=0.8,
-        label="Unsupported observed events", zorder=3,
-        alpha=0.85,
+    spatial_cmap = LinearSegmentedColormap.from_list(
+        "spatial",
+        ["#FFF9F0", "#F7D9AD", "#E9A23B"],
     )
-
-    # Value labels
+    ax_spatial.imshow(
+        spatial_normalized,
+        cmap=spatial_cmap,
+        vmin=0,
+        vmax=1,
+        aspect="auto",
+        interpolation="none",
+    )
+    ax_spatial.set_title(
+        "Spatial allocation diagnostics",
+        fontsize=13,
+        fontweight="bold",
+        color=_DEEP_NAVY,
+        pad=12,
+        loc="left",
+    )
+    ax_spatial.set_xticks([0, 1])
+    ax_spatial.set_xticklabels(
+        ["Forecast in\nempty cells", "Observed in\nzero-rate cells"],
+        fontsize=9,
+    )
+    ax_spatial.set_yticks(y)
+    ax_spatial.set_yticklabels(display_names, fontsize=9)
     for i in range(n_scenarios):
         ax_spatial.text(
-            x[i] - 0.15, empty_vals[i] + 1.5,
-            f"{empty_vals[i]:.1f}%", ha="center", fontsize=8, color=_AMBER, fontweight="bold",
+            0,
+            i,
+            f"{empty_vals[i]:.1f}%",
+            ha="center",
+            va="center",
+            fontsize=9,
+            fontweight="bold",
+            color=_DEEP_NAVY,
         )
         ax_spatial.text(
-            x[i] + 0.15, unsup_vals[i] + 1.5,
-            f"{unsup_vals[i]:.1f}%", ha="center", fontsize=8, color=_CORAL, fontweight="bold",
+            1,
+            i,
+            f"{unsup_vals[i]:.2f}%",
+            ha="center",
+            va="center",
+            fontsize=9,
+            fontweight="bold",
+            color=_DEEP_NAVY,
         )
-
-    ax_spatial.set_xticks(x)
-    ax_spatial.set_xticklabels(scenario_names, fontsize=10)
-    ax_spatial.legend(
-        loc="upper right", frameon=True, framealpha=0.95,
-        edgecolor=_GRID_CLR, fontsize=9,
+    ax_spatial.set_xticks(np.arange(-0.5, 2, 1), minor=True)
+    ax_spatial.set_yticks(np.arange(-0.5, n_scenarios, 1), minor=True)
+    ax_spatial.grid(which="minor", color="white", linewidth=2)
+    ax_spatial.tick_params(which="minor", bottom=False, left=False)
+    ax_spatial.tick_params(colors=_TEXT_CLR, labelsize=9, length=0)
+    for spine in ax_spatial.spines.values():
+        spine.set_color(_GRID_CLR)
+    ax_spatial.text(
+        1.0,
+        -0.14,
+        "Shading is normalized within each column",
+        transform=ax_spatial.transAxes,
+        ha="right",
+        fontsize=8,
+        color=_SUBTEXT,
     )
 
-    # ── Panel 5: Horizon Ratios (bar chart) ────────────────────────────
-    ax_horizon = fig.add_subplot(gs[2, 1])
-    _style_ax(ax_horizon, "Obs / Sim Ratio by Forecast Horizon", ylabel="Ratio")
-
+    # Horizon ratio matrix
+    ax_horizon = fig.add_subplot(gs[1, 1])
     ratio_pivot = horizon_df.pivot_table(
         index="scenario_name",
         columns="duration_days",
         values="observed_to_sim_mean_ratio",
+    ).reindex(scenario_names)
+    durations = ratio_pivot.columns.to_numpy(dtype=float)
+    horizon_values = ratio_pivot.to_numpy(dtype=float)
+    finite_horizon_values = horizon_values[np.isfinite(horizon_values)]
+    ratio_norm = TwoSlopeNorm(
+        vmin=min(0.6, float(finite_horizon_values.min())),
+        vcenter=1.0,
+        vmax=max(1.4, float(finite_horizon_values.max())),
     )
-    ratio_pivot = ratio_pivot.reindex(scenario_names)
-    durations = ratio_pivot.columns.tolist()
-
-    if n_scenarios == 1:
-        # Grouped bar for single scenario
-        horizon_x = np.arange(len(durations))
-        vals = ratio_pivot.iloc[0].values
-        horizon_bars = ax_horizon.bar(
-            horizon_x, vals, width=0.5,
-            color=_HORIZON_PALETTE[:len(durations)],
-            edgecolor="white", linewidth=1.2, zorder=3,
-        )
-        for hx, hv in zip(horizon_x, vals):
+    ax_horizon.imshow(
+        horizon_values,
+        cmap="RdBu_r",
+        norm=ratio_norm,
+        aspect="auto",
+        interpolation="none",
+    )
+    ax_horizon.set_title(
+        "Observed / simulated ratio by horizon",
+        fontsize=13,
+        fontweight="bold",
+        color=_DEEP_NAVY,
+        pad=12,
+        loc="left",
+    )
+    ax_horizon.set_xticks(np.arange(len(durations)))
+    ax_horizon.set_xticklabels([f"{int(duration)} d" for duration in durations], fontsize=8)
+    ax_horizon.set_yticks(y)
+    ax_horizon.set_yticklabels(display_names, fontsize=9)
+    for i in range(n_scenarios):
+        for j in range(len(durations)):
+            value = horizon_values[i, j]
             ax_horizon.text(
-                hx, hv + 0.01, f"{hv:.3f}",
-                ha="center", va="bottom", fontsize=10, fontweight="bold", color=_TEXT_CLR,
+                j,
+                i,
+                f"{value:.2f}",
+                ha="center",
+                va="center",
+                fontsize=8,
+                fontweight="bold",
+                color="white" if abs(value - 1.0) > 0.3 else _DEEP_NAVY,
             )
-        ax_horizon.set_xticks(horizon_x)
-        ax_horizon.set_xticklabels([f"{int(d)}-day" for d in durations], fontsize=10)
-        ax_horizon.axhline(1.0, color=_MUTED, linestyle="--", linewidth=1, zorder=2)
-        ax_horizon.set_ylim(0, max(vals) * 1.3 if max(vals) > 0 else 1.5)
-    else:
-        # Grouped bars per scenario for multi-scenario
-        group_width = 0.8
-        bar_w = group_width / len(durations)
-        for j, dur in enumerate(durations):
-            offset = (j - (len(durations) - 1) / 2) * bar_w
-            vals = ratio_pivot[dur].values
-            ax_horizon.bar(
-                x + offset, vals, width=bar_w * 0.9,
-                color=_HORIZON_PALETTE[j % len(_HORIZON_PALETTE)],
-                edgecolor="white", linewidth=0.8,
-                label=f"{int(dur)}-day", zorder=3,
-            )
-        ax_horizon.axhline(1.0, color=_MUTED, linestyle="--", linewidth=1, zorder=2)
-        ax_horizon.set_xticks(x)
-        ax_horizon.set_xticklabels(scenario_names, fontsize=10)
-        ax_horizon.legend(
-            loc="upper right", frameon=True, framealpha=0.95,
-            edgecolor=_GRID_CLR, fontsize=9,
-        )
+    ax_horizon.set_xticks(np.arange(-0.5, len(durations), 1), minor=True)
+    ax_horizon.set_yticks(np.arange(-0.5, n_scenarios, 1), minor=True)
+    ax_horizon.grid(which="minor", color="white", linewidth=2)
+    ax_horizon.tick_params(which="minor", bottom=False, left=False)
+    ax_horizon.tick_params(colors=_TEXT_CLR, labelsize=9, length=0)
+    for spine in ax_horizon.spines.values():
+        spine.set_color(_GRID_CLR)
+    ax_horizon.text(
+        1.0,
+        -0.14,
+        "Blue: overprediction | red: underprediction",
+        transform=ax_horizon.transAxes,
+        ha="right",
+        fontsize=8,
+        color=_SUBTEXT,
+    )
 
-    # ── Panel 6: Parameter Landscape ───────────────────────────────────
-    ax_params = fig.add_subplot(gs[2, 2])
+    # Parameter landscape
+    ax_params = fig.add_subplot(gs[1, 2])
 
     mu_finite = np.isfinite(ordered["final_log10_mu"])
     k0_finite = np.isfinite(ordered["final_log10_k0"])
@@ -1092,7 +1283,8 @@ def plot_scorecard(
 
     if mask.any() and mask.sum() > 1:
         _style_ax(
-            ax_params, "Parameter Landscape",
+            ax_params,
+            "Fitted parameter landscape",
             xlabel=r"Final $\log_{10}(\mu)$",
             ylabel=r"Final $\log_{10}(k_0)$",
         )
@@ -1101,26 +1293,48 @@ def plot_scorecard(
             ordered.loc[mask, "final_log10_k0"],
             c=ordered.loc[mask, "calibration_score"],
             cmap="RdYlGn_r",
-            s=160,
-            edgecolors=_DEEP_NAVY,
-            linewidths=1.5,
+            s=110,
+            edgecolors="white",
+            linewidths=1.2,
             zorder=5,
         )
+        grouped_points: dict[tuple[float, float], list[str]] = {}
         for row in ordered.loc[mask].itertuples(index=False):
+            key = (round(row.final_log10_mu, 3), round(row.final_log10_k0, 3))
+            grouped_points.setdefault(key, []).append(row.scenario_name.replace("_", " "))
+        mu_values = ordered.loc[mask, "final_log10_mu"]
+        k0_values = ordered.loc[mask, "final_log10_k0"]
+        mu_midpoint = float((mu_values.min() + mu_values.max()) / 2)
+        k0_midpoint = float((k0_values.min() + k0_values.max()) / 2)
+        for (mu_value, k0_value), names in grouped_points.items():
+            dx = -8 if mu_value >= mu_midpoint else 8
+            dy = -12 if k0_value >= k0_midpoint else 8
             ax_params.annotate(
-                row.scenario_name,
-                (row.final_log10_mu, row.final_log10_k0),
-                xytext=(6, 6),
+                " / ".join(names),
+                (mu_value, k0_value),
+                xytext=(dx, dy),
                 textcoords="offset points",
-                fontsize=9, fontweight="medium", color=_TEXT_CLR,
+                ha="left" if dx > 0 else "right",
+                fontsize=8,
+                fontweight="medium",
+                color=_TEXT_CLR,
                 path_effects=[pe.withStroke(linewidth=2, foreground="white")],
             )
-        cbar = plt.colorbar(sc, ax=ax_params, shrink=0.75, pad=0.03)
-        cbar.set_label("Calibration Score", fontsize=9, color=_TEXT_CLR)
+        best = ordered.iloc[0]
+        ax_params.scatter(
+            [best["final_log10_mu"]],
+            [best["final_log10_k0"]],
+            s=210,
+            facecolors="none",
+            edgecolors=_DEEP_NAVY,
+            linewidths=1.6,
+            zorder=6,
+        )
+        cbar = plt.colorbar(sc, ax=ax_params, shrink=0.82, pad=0.03)
+        cbar.set_label("Calibration score", fontsize=9, color=_TEXT_CLR)
         cbar.ax.tick_params(labelsize=8)
     elif mask.any() and mask.sum() == 1:
-        # Single scenario: show a summary card instead of a meaningless scatter
-        _style_ax(ax_params, "Fitted Parameters")
+        _style_ax(ax_params, "Fitted parameters")
         row = ordered.iloc[0]
         param_lines = [
             (r"$\log_{10}(\mu)$", f"{row.get('final_log10_mu', float('nan')):.3f}"),
@@ -1156,7 +1370,13 @@ def plot_scorecard(
     else:
         ax_params.axis("off")
 
-    fig.savefig(output_path, dpi=300, facecolor=_LIGHT_BG)
+    fig.savefig(
+        output_path,
+        dpi=220,
+        facecolor=_LIGHT_BG,
+        bbox_inches="tight",
+        pad_inches=0.2,
+    )
     plt.close(fig)
 
 
@@ -1171,6 +1391,13 @@ def main() -> None:
     batch_label = scenario_run_label(args.batch_name, forecast_start)
     batch_output_dir = ensure_dir(os.path.join(BASE_DIR, "output_nz_wide_calibration", batch_label))
 
+    max_parallel = resolve_max_parallel_scenarios(args.max_parallel_scenarios, len(scenarios))
+    simulation_workers = resolve_child_simulation_workers(args.simulation_workers, max_parallel)
+    child_env = build_child_env(max_parallel) if max_parallel > 1 else None
+    log_dir = (
+        ensure_dir(os.path.join(batch_output_dir, "logs")) if max_parallel > 1 else None
+    )
+
     scenario_records = []
     horizon_frames = []
     manifest = {
@@ -1181,34 +1408,102 @@ def main() -> None:
         "n_simulations": args.n_simulations,
         "background_rate_file": args.background_rate_file,
         "background_rate_mag": args.background_rate_mag,
+        "max_parallel_scenarios": max_parallel,
+        "simulation_workers": simulation_workers,
         "scenarios": [],
         "failures": [],
     }
 
+    def execute_scenario(scenario: Scenario) -> dict[str, Any]:
+        log_path = (
+            os.path.join(log_dir, f"{slugify(scenario.name)}.log") if log_dir else None
+        )
+        experiment_name, metadata_path = run_scenario(
+            scenario,
+            args,
+            forecast_start,
+            logger,
+            log_path=log_path,
+            child_env=child_env,
+            simulation_workers=simulation_workers,
+        )
+        record, horizon_df = collect_scenario_results(
+            scenario,
+            experiment_name,
+            metadata_path,
+            args,
+            logger,
+        )
+        manifest_entry = {
+            **asdict(scenario),
+            "experiment_name": experiment_name,
+            "metadata_path": metadata_path,
+        }
+        if log_path is not None and os.path.exists(log_path):
+            manifest_entry["log_path"] = log_path
+        return {
+            "record": record,
+            "horizon_df": horizon_df,
+            "manifest_entry": manifest_entry,
+        }
+
+    results: dict[str, dict[str, Any]] = {}
+    if max_parallel > 1:
+        warm_numba_cache(logger)
+        logger.info(
+            "Running %d scenarios with up to %d in parallel "
+            "(%s threads per child, %d simulation workers each); "
+            "scenario output in %s",
+            len(scenarios),
+            max_parallel,
+            child_env["NUMBA_NUM_THREADS"],
+            simulation_workers,
+            log_dir,
+        )
+        first_error: Exception | None = None
+        with ThreadPoolExecutor(max_workers=max_parallel) as pool:
+            future_map = {
+                pool.submit(execute_scenario, scenario): scenario
+                for scenario in scenarios
+            }
+            for future in as_completed(future_map):
+                scenario = future_map[future]
+                if future.cancelled():
+                    manifest["failures"].append(
+                        {"scenario": scenario.name, "error": "cancelled"}
+                    )
+                    continue
+                try:
+                    results[scenario.name] = future.result()
+                    logger.info("Scenario '%s' finished.", scenario.name)
+                except Exception as exc:
+                    logger.error("Scenario '%s' failed: %s", scenario.name, exc)
+                    manifest["failures"].append(
+                        {"scenario": scenario.name, "error": str(exc)}
+                    )
+                    if not args.continue_on_error:
+                        first_error = first_error or exc
+                        for pending in future_map:
+                            pending.cancel()
+        if first_error is not None:
+            raise first_error
+    else:
+        for scenario in scenarios:
+            try:
+                results[scenario.name] = execute_scenario(scenario)
+            except Exception as exc:  # pragma: no cover - best effort continuation
+                logger.error("Scenario '%s' failed: %s", scenario.name, exc)
+                manifest["failures"].append({"scenario": scenario.name, "error": str(exc)})
+                if not args.continue_on_error:
+                    raise
+
     for scenario in scenarios:
-        try:
-            experiment_name, metadata_path = run_scenario(scenario, args, forecast_start, logger)
-            record, horizon_df = collect_scenario_results(
-                scenario,
-                experiment_name,
-                metadata_path,
-                args,
-                logger,
-            )
-            scenario_records.append(record)
-            horizon_frames.append(horizon_df)
-            manifest["scenarios"].append(
-                {
-                    **asdict(scenario),
-                    "experiment_name": experiment_name,
-                    "metadata_path": metadata_path,
-                }
-            )
-        except Exception as exc:  # pragma: no cover - best effort continuation
-            logger.error("Scenario '%s' failed: %s", scenario.name, exc)
-            manifest["failures"].append({"scenario": scenario.name, "error": str(exc)})
-            if not args.continue_on_error:
-                raise
+        result = results.get(scenario.name)
+        if result is None:
+            continue
+        scenario_records.append(result["record"])
+        horizon_frames.append(result["horizon_df"])
+        manifest["scenarios"].append(result["manifest_entry"])
 
     if not scenario_records:
         raise RuntimeError("No scenarios completed successfully.")

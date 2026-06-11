@@ -1435,7 +1435,7 @@ class ETASSimulation:
                 (n_simulations - 1) // chunksize) * chunksize
             if last_index > max_store_incomplete:
                 logger.debug("all done, nothing left to do.")
-                exit()
+                return
             else:
                 chunks_done = last_index // chunksize
                 if last_index % chunksize > 0:
