@@ -5,3 +5,8 @@ __pycache__/
 *.blg
 *.log
 *.out
+.nfs*
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+manuscript.pdf
