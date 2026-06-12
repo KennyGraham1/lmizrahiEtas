@@ -149,9 +149,26 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mc",
+        default=str(DEFAULT_MC),
+        help=(
+            "Magnitude of completeness, or 'var' when the catalog contains an "
+            f"event-wise mc_current column. Default: {DEFAULT_MC}"
+        ),
+    )
+    parser.add_argument(
+        "--m-ref",
         type=float,
-        default=DEFAULT_MC,
-        help=f"Magnitude of completeness. Default: {DEFAULT_MC}",
+        default=None,
+        help="Reference magnitude required with --mc var.",
+    )
+    parser.add_argument(
+        "--evaluation-mc",
+        type=float,
+        default=None,
+        help=(
+            "Common threshold used for simulation output and forecast evaluation. "
+            "Required with --mc var; otherwise defaults to --mc."
+        ),
     )
     parser.add_argument(
         "--m-max",
@@ -247,6 +264,25 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--catalog-path",
+        default=CATALOG_PATH,
+        help=f"Earthquake catalog CSV. Default: {CATALOG_PATH}",
+    )
+    parser.add_argument(
+        "--polygon-path",
+        default=POLYGON_PATH,
+        help=f"Outer source-domain polygon (.npy). Default: {POLYGON_PATH}",
+    )
+    parser.add_argument(
+        "--inner-polygon-path",
+        default=None,
+        help=(
+            "Optional inner target-domain polygon (.npy). Events in the outer "
+            "polygon can act as sources, while likelihood targets are restricted "
+            "to this inner polygon."
+        ),
+    )
+    parser.add_argument(
         "--background-rate-mag",
         type=float,
         default=5.0,
@@ -301,8 +337,16 @@ def resolve_path(path: str | None) -> str | None:
     return os.path.abspath(path)
 
 
-def ensure_inputs_exist(background_rate_file: str | None = None) -> None:
-    missing = [path for path in (CATALOG_PATH, POLYGON_PATH) if not os.path.exists(path)]
+def ensure_inputs_exist(
+    background_rate_file: str | None = None,
+    catalog_path: str = CATALOG_PATH,
+    polygon_path: str = POLYGON_PATH,
+    inner_polygon_path: str | None = None,
+) -> None:
+    required = [catalog_path, polygon_path]
+    if inner_polygon_path:
+        required.append(inner_polygon_path)
+    missing = [path for path in required if not os.path.exists(path)]
     if background_rate_file and not os.path.exists(background_rate_file):
         missing.append(background_rate_file)
     if missing:
@@ -320,13 +364,16 @@ def as_store_dir(path: str) -> str:
     return path if path.endswith(os.sep) else path + os.sep
 
 
-def load_catalog() -> pd.DataFrame:
-    catalog = pd.read_csv(CATALOG_PATH, index_col=0, parse_dates=["time"])
+def load_catalog(
+    catalog_path: str = CATALOG_PATH,
+    polygon_path: str = POLYGON_PATH,
+) -> pd.DataFrame:
+    catalog = pd.read_csv(catalog_path, index_col=0, parse_dates=["time"])
     catalog.sort_values(by="time", inplace=True)
     
     # Filter by the polygon instead of a bounding box
-    if os.path.exists(POLYGON_PATH):
-        coords = np.load(POLYGON_PATH)
+    if os.path.exists(polygon_path):
+        coords = np.load(polygon_path)
         # coords is likely [lat, lon] based on how it's created and used in pyCSEP
         from matplotlib.path import Path
         poly_path = Path(np.column_stack([coords[:, 1], coords[:, 0]])) # [lon, lat]
@@ -406,9 +453,10 @@ def prepare_background_rate_catalog(
     run_label: str,
     background_rate_file: str | None,
     background_rate_mag: float,
+    source_catalog_path: str = CATALOG_PATH,
 ) -> tuple[str, pd.DataFrame | None, dict]:
     if background_rate_file is None:
-        return CATALOG_PATH, None, {}
+        return source_catalog_path, None, {}
 
     background_grid, grid_metadata = load_background_rate_grid(
         background_rate_file,
@@ -459,9 +507,12 @@ def build_inversion_config(
     forecast_start: dt.datetime,
     auxiliary_start: str,
     timewindow_start: str,
-    mc: float,
+    mc: float | str,
     initial_theta: dict,
     bg_term: str | None = None,
+    shape_coords: str = POLYGON_PATH,
+    inner_shape_coords: str | None = None,
+    m_ref: float | None = None,
 ) -> dict:
     theta = initial_theta.copy()
     if bg_term is not None and theta.get("log10_iota") is None:
@@ -474,13 +525,15 @@ def build_inversion_config(
         "timewindow_end": forecast_start.strftime("%Y-%m-%d %H:%M:%S"),
         "theta_0": theta,
         "mc": mc,
-        "m_ref": mc,
+        "m_ref": mc if m_ref is None else m_ref,
         "delta_m": 0.1,
         "coppersmith_multiplier": 100,
-        "shape_coords": POLYGON_PATH,
+        "shape_coords": shape_coords,
         "name": "nz_wide_standard",
         "id": run_label,
     }
+    if inner_shape_coords is not None:
+        config["inner_shape_coords"] = inner_shape_coords
     if bg_term is not None:
         config["bg_term"] = bg_term
     return config
@@ -765,6 +818,42 @@ def run_simulations(
     return simulation_paths
 
 
+def filter_simulations_to_inner_polygon(
+    simulation_paths: dict[int, str],
+    inner_polygon_path: str,
+    replace_outer: bool = False,
+) -> dict[int, str]:
+    """Retain outer-domain cascades but store only events in the target domain."""
+    from matplotlib.path import Path
+
+    coords = np.load(inner_polygon_path)
+    polygon = Path(np.column_stack([coords[:, 1], coords[:, 0]]))
+    for duration, target_path in simulation_paths.items():
+        outer_path = target_path.replace(".csv", "_outer_domain.csv")
+        if os.path.exists(target_path) and (
+            not os.path.exists(outer_path) or replace_outer
+        ):
+            if os.path.exists(outer_path):
+                os.remove(outer_path)
+            os.replace(target_path, outer_path)
+        if not os.path.exists(outer_path):
+            raise FileNotFoundError(f"Missing outer-domain simulation: {outer_path}")
+        simulations = pd.read_csv(outer_path, index_col=0)
+        points = np.column_stack([
+            simulations["longitude"], simulations["latitude"]
+        ])
+        simulations.loc[polygon.contains_points(points, radius=1e-12)].to_csv(
+            target_path
+        )
+        logger.info(
+            "Filtered %s-day simulations from %s to %s target-domain events.",
+            duration,
+            len(simulations),
+            sum(polygon.contains_points(points, radius=1e-12)),
+        )
+    return simulation_paths
+
+
 def _minimum_positive_spacing(values: pd.Series) -> float:
     unique_values = np.sort(values.drop_duplicates().to_numpy())
     diffs = np.diff(unique_values)
@@ -835,6 +924,7 @@ def evaluate_forecasts(
     mc: float,
     figure_dir: str,
     skip_plots: bool,
+    shape_coords: str = POLYGON_PATH,
 ) -> pd.DataFrame:
     records = []
 
@@ -852,7 +942,7 @@ def evaluate_forecasts(
                     "mc": mc,
                     "duration_days": duration,
                     "forecast_start": forecast_start,
-                    "shape_coords": POLYGON_PATH,
+                    "shape_coords": shape_coords,
                 },
                 output_path=plot_path,
             )
@@ -897,10 +987,14 @@ def write_metadata(
         "forecast_start": forecast_start.strftime("%Y-%m-%d %H:%M:%S"),
         "forecast_durations_days": durations,
         "n_simulations": args.n_simulations,
-        "mc": args.mc,
+        "mc": args.evaluation_mc if args.mc == "var" else args.mc,
+        "inversion_mc": args.mc,
+        "m_ref": args.m_ref,
         "m_max": args.m_max,
-        "catalog_path": CATALOG_PATH,
-        "polygon_path": POLYGON_PATH,
+        "catalog_path": args.catalog_path,
+        "polygon_path": args.inner_polygon_path or args.polygon_path,
+        "source_polygon_path": args.polygon_path,
+        "inner_polygon_path": args.inner_polygon_path,
         "lat_range": list(LAT_RANGE),
         "lon_range": list(LON_RANGE),
         "auxiliary_start": args.auxiliary_start,
@@ -989,8 +1083,27 @@ def maybe_run_pycsep_analysis(
 
 def main() -> None:
     args = parse_args()
+    if args.mc == "var":
+        if args.m_ref is None or args.evaluation_mc is None:
+            raise ValueError("--mc var requires --m-ref and --evaluation-mc.")
+        inversion_mc: float | str = "var"
+        evaluation_mc = args.evaluation_mc
+    else:
+        inversion_mc = float(args.mc)
+        evaluation_mc = (
+            args.evaluation_mc if args.evaluation_mc is not None else inversion_mc
+        )
+        args.mc = inversion_mc
     args.background_rate_file = resolve_path(args.background_rate_file)
-    ensure_inputs_exist(args.background_rate_file)
+    args.catalog_path = resolve_path(args.catalog_path)
+    args.polygon_path = resolve_path(args.polygon_path)
+    args.inner_polygon_path = resolve_path(args.inner_polygon_path)
+    ensure_inputs_exist(
+        args.background_rate_file,
+        args.catalog_path,
+        args.polygon_path,
+        args.inner_polygon_path,
+    )
 
     forecast_start = parse_datetime(args.forecast_start)
     durations = parse_durations(args.durations)
@@ -1007,7 +1120,7 @@ def main() -> None:
             args.background_rate_mag,
         )
 
-    catalog = load_catalog()
+    catalog = load_catalog(args.catalog_path, args.polygon_path)
     if forecast_start <= pd.Timestamp(args.timewindow_start).to_pydatetime():
         raise ValueError("forecast_start must be after timewindow_start.")
 
@@ -1037,6 +1150,7 @@ def main() -> None:
         output_paths["run_label"],
         args.background_rate_file,
         args.background_rate_mag,
+        source_catalog_path=args.catalog_path,
     )
     config = build_inversion_config(
         output_paths["run_label"],
@@ -1044,13 +1158,16 @@ def main() -> None:
         forecast_start,
         args.auxiliary_start,
         args.timewindow_start,
-        args.mc,
+        inversion_mc,
         initial_theta,
         bg_term=(
             BACKGROUND_RATE_COLUMN
             if args.background_rate_file is not None
             else None
         ),
+        shape_coords=args.polygon_path,
+        inner_shape_coords=args.inner_polygon_path,
+        m_ref=args.m_ref,
     )
     calculation, parameter_path = load_or_run_inversion(
         config,
@@ -1064,7 +1181,7 @@ def main() -> None:
         calculation,
         durations,
         args.n_simulations,
-        args.mc,
+        evaluation_mc,
         args.m_max,
         output_paths["simulation_dir"],
         background_grid=background_grid,
@@ -1076,20 +1193,27 @@ def main() -> None:
         fn_catalog=config["fn_catalog"],
         shape_coords=config["shape_coords"],
     )
+    if args.inner_polygon_path:
+        simulation_paths = filter_simulations_to_inner_polygon(
+            simulation_paths,
+            args.inner_polygon_path,
+            replace_outer=args.force_resimulate or args.force_reinvert,
+        )
     observed_windows, observed_paths = build_observed_windows(
         catalog,
         forecast_start,
         durations,
-        args.mc,
+        evaluation_mc,
         output_paths["output_dir"],
     )
     evaluation_summary = evaluate_forecasts(
         simulation_paths,
         observed_windows,
         forecast_start,
-        args.mc,
+        evaluation_mc,
         output_paths["figure_dir"],
         args.skip_plots,
+        shape_coords=args.inner_polygon_path or args.polygon_path,
     )
     evaluation_summary.to_csv(output_paths["evaluation_summary_path"], index=False)
 

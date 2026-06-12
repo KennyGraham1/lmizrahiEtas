@@ -1092,6 +1092,9 @@ class ETASParameterCalculation:
             "  model is named {}, has ID {}".format(obj.name, obj.id))
 
         obj.shape_coords = read_shape_coords(metadata["shape_coords"])
+        obj.inner_shape_coords = read_shape_coords(
+            metadata.get("inner_shape_coords", None)
+        )
 
         obj.fn_catalog = metadata["fn_catalog"]
 
@@ -1707,6 +1710,11 @@ class ETASParameterCalculation:
             "testwindow_end": str(self.testwindow_end),
             "timewindow_length": self.timewindow_length,
             "shape_coords": str(list(self.shape_coords)),
+            "inner_shape_coords": (
+                str(list(self.inner_shape_coords))
+                if self.inner_shape_coords is not None
+                else None
+            ),
             "delta_m": self.delta_m,
             "mc": self.mc,
             "m_ref": self.m_ref,

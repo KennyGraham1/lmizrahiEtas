@@ -418,7 +418,8 @@ def summarize_result(result: Any, one_sided_lower: bool) -> dict[str, Any]:
         if one_sided_lower:
             consistent = bool(upper >= 0.025)
         else:
-            consistent = bool(not (upper < 0.025 or lower > 0.975))
+            # pyCSEP returns (P[T_sim >= T_obs], P[T_sim <= T_obs]).
+            consistent = bool(lower >= 0.025 and upper >= 0.025)
 
     distribution = np.asarray(result.test_distribution, dtype=float)
     if distribution.size == 0:
@@ -1309,7 +1310,11 @@ def evaluate_horizon(
 
     results = {
         "number_test": catalog_evaluations.number_test(forecast, observed_catalog),
-        "magnitude_test": catalog_evaluations.magnitude_test(forecast, observed_catalog),
+        "magnitude_test": (
+            catalog_evaluations.resampled_magnitude_test(forecast, observed_catalog)
+            if hasattr(catalog_evaluations, "resampled_magnitude_test")
+            else catalog_evaluations.magnitude_test(forecast, observed_catalog)
+        ),
         "spatial_test": catalog_evaluations.spatial_test(forecast, observed_catalog),
         "pseudolikelihood_test": catalog_evaluations.pseudolikelihood_test(forecast, observed_catalog),
     }

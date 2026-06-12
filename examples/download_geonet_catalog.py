@@ -10,6 +10,7 @@ import numpy as np
 import os
 from io import StringIO
 import logging
+from typing import Optional
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -85,8 +86,35 @@ def download_geonet_catalog(
     # Parse time
     df["time"] = pd.to_datetime(df["time"])
     
-    # Select relevant columns
-    df = df[["id", "time", "latitude", "longitude", "magnitude"]].copy()
+    # Retain magnitude provenance and source metadata needed for catalog
+    # homogenization and reproducibility.
+    selected = [
+        "id",
+        "time",
+        "latitude",
+        "longitude",
+        "depth",
+        "magnitude",
+        "mag_type",
+        "Author",
+        "Catalog",
+        "Contributor",
+        "MagAuthor",
+        "EventLocationName",
+        "EventType",
+    ]
+    selected = [column for column in selected if column in df.columns]
+    df = df[selected].copy()
+    df = df.rename(
+        columns={
+            "Author": "author",
+            "Catalog": "catalog",
+            "Contributor": "contributor",
+            "MagAuthor": "mag_author",
+            "EventLocationName": "event_location_name",
+            "EventType": "event_type",
+        }
+    )
     df = df.set_index("id")
     df = df.sort_values("time")
     
@@ -183,6 +211,76 @@ def download_geonet_catalog_chunked(
         catalog.to_csv(output_file)
         logger.info(f"Saved catalog to {output_file}")
     
+    return catalog
+
+
+def download_geonet_catalog_dateline(
+    starttime: str,
+    endtime: str,
+    minmagnitude: float,
+    minlatitude: float,
+    maxlatitude: float,
+    minlongitude_unwrapped: float,
+    maxlongitude_unwrapped: float,
+    output_file: Optional[str] = None,
+    chunk_years: int = 5,
+) -> pd.DataFrame:
+    """Download a longitude interval that may cross 180 degrees.
+
+    Longitudes west of the dateline are converted from ``[-180, -170]`` to
+    ``[180, 190]`` so spatial calculations can use one continuous coordinate
+    system around New Zealand.
+    """
+    if not 0 < minlongitude_unwrapped < maxlongitude_unwrapped <= 360:
+        raise ValueError("Expected an unwrapped longitude interval in (0, 360].")
+
+    pieces = []
+    east_max = min(maxlongitude_unwrapped, 180.0)
+    if minlongitude_unwrapped < east_max:
+        pieces.append(
+            download_geonet_catalog_chunked(
+                starttime=starttime,
+                endtime=endtime,
+                minmagnitude=minmagnitude,
+                minlatitude=minlatitude,
+                maxlatitude=maxlatitude,
+                minlongitude=minlongitude_unwrapped,
+                maxlongitude=east_max,
+                chunk_years=chunk_years,
+            )
+        )
+
+    if maxlongitude_unwrapped > 180.0:
+        west_min = max(minlongitude_unwrapped, 180.0) - 360.0
+        west_max = maxlongitude_unwrapped - 360.0
+        west = download_geonet_catalog_chunked(
+            starttime=starttime,
+            endtime=endtime,
+            minmagnitude=minmagnitude,
+            minlatitude=minlatitude,
+            maxlatitude=maxlatitude,
+            minlongitude=west_min,
+            maxlongitude=west_max,
+            chunk_years=chunk_years,
+        )
+        west = west.copy()
+        west["longitude"] = west["longitude"].where(
+            west["longitude"] >= 0, west["longitude"] + 360.0
+        )
+        pieces.append(west)
+
+    if not pieces:
+        raise ValueError("The requested longitude interval produced no queries.")
+
+    catalog = pd.concat(pieces)
+    catalog = catalog[~catalog.index.duplicated(keep="first")].sort_values("time")
+    if output_file:
+        os.makedirs(
+            os.path.dirname(output_file) if os.path.dirname(output_file) else ".",
+            exist_ok=True,
+        )
+        catalog.to_csv(output_file)
+        logger.info("Saved dateline-aware catalog to %s", output_file)
     return catalog
 
 
